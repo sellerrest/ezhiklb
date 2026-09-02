@@ -111,10 +111,11 @@ cmd_admins() {
 cmd_update() {
   need_root
   command -v curl >/dev/null || die "нужен curl"
-  local current latest tmp
+  local current latest tmp release_json
   current="$( [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || echo 0.0.0 )"
-  latest="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
-  [[ -n "$latest" ]] || die "не удалось проверить последнюю версию (GitHub API недоступен?)"
+  release_json="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null)" || release_json=""
+  latest="$(printf '%s' "$release_json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
+  [[ -n "$latest" ]] || die "не удалось проверить последнюю версию — есть ли уже опубликованный релиз?"
   if [[ "$latest" == "$current" ]]; then
     log "уже установлена последняя версия ($current)"
     return 0

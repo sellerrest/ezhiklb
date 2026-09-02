@@ -21,7 +21,8 @@ command -v curl >/dev/null || die "curl is required"
 command -v tar >/dev/null || die "tar is required"
 
 log "checking latest release of ${REPO_SLUG}"
-latest="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
+release_json="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null)" || release_json=""
+latest="$(printf '%s' "$release_json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
 [[ -n "$latest" ]] || die "could not determine the latest release — has one been published yet? See .github/workflows/release.yml"
 
 tmp="$(mktemp -d)"
