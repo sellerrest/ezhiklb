@@ -10,7 +10,7 @@
 #   sudo ./install-node.sh --docker     # Docker container instead
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.6"
+EZHIKLB_VERSION="1.0.7"
 MODE="systemd"
 [[ "${1:-}" == "--docker" ]] && MODE="docker"
 
@@ -69,6 +69,14 @@ ip_vs_wrr
 nf_conntrack
 xt_ipvs
 EOF
+# Every key here must match internal/agent/reconciler.go's configureKernel()
+# exactly: on the --docker path the agent reads these from /proc/sys before
+# writing (see that function's comment) and only attempts a real write when
+# the value doesn't already match — with --network host, /proc/sys/net/*
+# inside the container reflects the *host's* real values, but the container
+# runtime still mounts /proc/sys read-only regardless of capabilities, so a
+# value not already correct here fails with "permission denied" instead of
+# being fixed from inside the container.
 cat >/etc/sysctl.d/98-ezhiklb.conf <<'EOF'
 net.ipv4.ip_forward = 1
 net.ipv4.vs.conntrack = 1
@@ -77,6 +85,9 @@ net.ipv4.vs.expire_nodest_conn = 1
 net.ipv4.vs.expire_quiescent_template = 1
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 86400
+net.netfilter.nf_conntrack_max = 2000000
 EOF
 modprobe ip_vs ip_vs_rr ip_vs_wrr nf_conntrack xt_ipvs
 sysctl --load /etc/sysctl.d/98-ezhiklb.conf >/dev/null

@@ -644,6 +644,19 @@ func (r *Reconciler) configureKernel(ctx context.Context) error {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		// Read before write: in the --docker deployment, --network host
+		// makes /proc/sys/net/* reflect the *host's* real values (since the
+		// container shares the host's network namespace), but the container
+		// runtime still mounts /proc/sys read-only by default regardless of
+		// capabilities — writing fails with "permission denied" even though
+		// the value is already correct, because scripts/install-node.sh
+		// pre-sets every one of these on the host before the container ever
+		// starts. Only attempt the write when the value actually needs to
+		// change, so an already-correct host doesn't require write access.
+		procPath := "/proc/sys/" + strings.ReplaceAll(key, ".", "/")
+		if current, err := os.ReadFile(procPath); err == nil && strings.TrimSpace(string(current)) == values[key] {
+			continue
+		}
 		if _, err := r.runner.Run(ctx, "sysctl", []string{"-w", key + "=" + values[key]}, ""); err != nil {
 			return err
 		}
