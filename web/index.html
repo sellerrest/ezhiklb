@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090a0b" />
+    <meta name="color-scheme" content="dark" />
+    <title>EzhikLB — Load Balancer</title>
+    <script>
+      // Applies the saved/default theme class before React mounts, so the
+      // first paint is never a flash of the light palette.
+      ;(function () {
+        try {
+          var saved = localStorage.getItem("theme")
+          var theme = saved === "light" || saved === "dark" ? saved : "dark"
+          if (theme === "system") theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+          document.documentElement.classList.add(theme)
+        } catch (e) {
+          document.documentElement.classList.add("dark")
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

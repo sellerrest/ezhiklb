@@ -1,0 +1,28 @@
+# Alternative to scripts/install-panel.sh's systemd/venv install — pick one.
+# `ezhik-lb edit` (see scripts/ezhik-lb) edits this file when it finds it
+# next to itself, instead of a systemd unit.
+#
+#   docker compose up -d --build
+#
+# First visit to the panel (default: http://127.0.0.1:8080, or via an SSH
+# tunnel to it) creates the admin account. EZHIKLB_DATABASE_URL below
+# defaults to SQLite in the named volume; point it at a postgresql+asyncpg
+# DSN instead to use Postgres.
+services:
+  panel:
+    build:
+      context: .
+      dockerfile: docker/panel.Dockerfile
+    image: ezhiklb-panel:latest
+    container_name: ezhiklb-panel
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      EZHIKLB_DATABASE_URL: sqlite+aiosqlite:////var/lib/ezhiklb/ezhiklb.db
+      EZHIKLB_POLL_INTERVAL_SECONDS: "5"
+    volumes:
+      - ezhiklb-panel-data:/var/lib/ezhiklb
+
+volumes:
+  ezhiklb-panel-data:

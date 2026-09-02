@@ -1,0 +1,35 @@
+# Reference clones kept locally for comparison only — never part of this fork's own history.
+/upstream-ezhiklb/
+/upstream-pasarguard/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.spec.lock
+
+# Node / web
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Local runtime data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/panel/data/
+/node-agent/data/
+.env
+*.env.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

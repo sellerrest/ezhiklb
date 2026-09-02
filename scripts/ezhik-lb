@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# EzhikLB panel management CLI — installed to /usr/local/bin/ezhik-lb by
+# scripts/install-panel.sh. Works against whichever deployment the panel
+# was actually installed with: systemd+venv (scripts/install-panel.sh,
+# the default) or Docker Compose (docker-compose.yml symlinked/copied to
+# ${PREFIX}/docker-compose.yml) — `using_docker` below is the only place
+# that distinction matters; every command branches on it once.
+set -Eeuo pipefail
+
+PREFIX="/opt/ezhiklb"
+CONFIG_DIR="/etc/ezhiklb"
+DATA_DIR="/var/lib/ezhiklb"
+ENV_FILE="${CONFIG_DIR}/ezhiklb.env"
+VERSION_FILE="${CONFIG_DIR}/panel-version"
+SERVICE="ezhiklb.service"
+COMPOSE_FILE="${PREFIX}/docker-compose.yml"
+# Replace with your fork's "owner/repo" — same slug the frontend's
+# use-version-check.ts checks against for the "update available" badge.
+REPO_SLUG="sellerrest/ezhiklb"
+
+log() { printf '\n\033[1;36mezhik-lb\033[0m %s\n' "$*"; }
+die() { printf '\nezhik-lb error: %s\n' "$*" >&2; exit 1; }
+need_root() { [[ "${EUID}" -eq 0 ]] || die "run as root (sudo ezhik-lb ...)"; }
+confirm() {
+  local reply
+  read -r -p "$1 [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+using_docker() { [[ -f "$COMPOSE_FILE" ]]; }
+
+usage() {
+  cat <<'EOF'
+ezhik-lb — управление панелью EzhikLB
+
+Использование: ezhik-lb <команда> [аргументы]
+
+  stop              Остановить панель
+  restart           Перезапустить панель
+  logs              Смотреть логи панели (в реальном времени, Ctrl+C для выхода)
+  edit-env          Отредактировать переменные окружения панели
+  edit              Отредактировать файл сервиса (systemd unit или docker-compose.yml)
+  admins list       Список админов
+  admins add <login>       Добавить админа
+  admins passwd <login>    Изменить пароль админа
+  admins remove <login>    Удалить админа
+  update            Проверить и установить новую версию панели
+  uninstall         Полностью удалить панель
+
+Примеры:
+  ezhik-lb logs
+  ezhik-lb admins add ivan
+  sudo ezhik-lb update
+EOF
+}
+
+cmd_stop() {
+  need_root
+  if using_docker; then docker compose -f "$COMPOSE_FILE" stop; else systemctl stop "$SERVICE"; fi
+  log "панель остановлена"
+}
+
+cmd_restart() {
+  need_root
+  if using_docker; then docker compose -f "$COMPOSE_FILE" restart; else systemctl restart "$SERVICE"; fi
+  log "панель перезапущена"
+}
+
+cmd_logs() {
+  if using_docker; then
+    docker compose -f "$COMPOSE_FILE" logs -f --tail=200
+  else
+    journalctl -u "$SERVICE" -f --output=cat
+  fi
+}
+
+cmd_edit_env() {
+  need_root
+  [[ -f "$ENV_FILE" ]] || die "файл не найден: $ENV_FILE"
+  "${EDITOR:-nano}" "$ENV_FILE"
+  confirm "Перезапустить панель, чтобы применить изменения?" && cmd_restart
+}
+
+cmd_edit() {
+  need_root
+  if using_docker; then
+    "${EDITOR:-nano}" "$COMPOSE_FILE"
+    confirm "Пересоздать контейнер, чтобы применить изменения?" && docker compose -f "$COMPOSE_FILE" up -d --build
+  else
+    local unit="/etc/systemd/system/${SERVICE}"
+    [[ -f "$unit" ]] || die "файл не найден: $unit"
+    "${EDITOR:-nano}" "$unit"
+    systemctl daemon-reload
+    confirm "Перезапустить панель, чтобы применить изменения?" && cmd_restart
+  fi
+}
+
+cmd_admins() {
+  need_root
+  [[ -f "$ENV_FILE" ]] || die "файл не найден: $ENV_FILE (панель ещё не установлена?)"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  if using_docker; then
+    docker compose -f "$COMPOSE_FILE" exec -T panel python -m ezhiklb_panel.admin_cli "$@"
+  else
+    "${PREFIX}/venv/bin/python" -m ezhiklb_panel.admin_cli "$@"
+  fi
+}
+
+cmd_update() {
+  need_root
+  command -v curl >/dev/null || die "нужен curl"
+  local current latest tmp
+  current="$( [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || echo 0.0.0 )"
+  latest="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
+  [[ -n "$latest" ]] || die "не удалось проверить последнюю версию (GitHub API недоступен?)"
+  if [[ "$latest" == "$current" ]]; then
+    log "уже установлена последняя версия ($current)"
+    return 0
+  fi
+  log "доступно обновление: $current -> $latest"
+  confirm "Установить $latest сейчас?" || { echo "Отменено."; return 1; }
+
+  if using_docker; then
+    log "пересобираю и обновляю образ"
+    ( cd "$PREFIX" && git pull --ff-only 2>/dev/null || true )
+    docker compose -f "$COMPOSE_FILE" up -d --build
+    log "обновлено до $latest"
+    return 0
+  fi
+
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  log "скачиваю релиз $latest"
+  curl -fsSL "https://github.com/${REPO_SLUG}/releases/download/v${latest}/ezhiklb-${latest}.tar.gz" -o "${tmp}/release.tar.gz" \
+    || die "не удалось скачать релиз — проверьте, что релиз v${latest} содержит файл ezhiklb-${latest}.tar.gz"
+  tar -xzf "${tmp}/release.tar.gz" -C "$tmp"
+  [[ -x "${tmp}/scripts/install-panel.sh" ]] || die "в архиве релиза нет scripts/install-panel.sh"
+  log "устанавливаю $latest"
+  "${tmp}/scripts/install-panel.sh"
+  log "обновлено до $latest"
+}
+
+cmd_uninstall() {
+  need_root
+  echo "Это остановит и полностью удалит панель: сервис, venv, systemd unit,"
+  echo "базу данных (${DATA_DIR}) и конфигурацию (${CONFIG_DIR})."
+  confirm "Вы уверены?" || { echo "Отменено."; return 1; }
+
+  if using_docker; then
+    docker compose -f "$COMPOSE_FILE" down -v || true
+  else
+    systemctl stop "$SERVICE" 2>/dev/null || true
+    systemctl disable "$SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${SERVICE}"
+    systemctl daemon-reload
+  fi
+  rm -rf "$PREFIX" "$CONFIG_DIR" "$DATA_DIR" /usr/share/ezhiklb
+  rm -f /usr/local/bin/ezhik-lb
+  log "панель полностью удалена. Ноды не затронуты — удаляйте их отдельно на каждой VPS."
+}
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    logs) cmd_logs ;;
+    edit-env) cmd_edit_env ;;
+    edit) cmd_edit ;;
+    admins) cmd_admins "$@" ;;
+    update) cmd_update ;;
+    uninstall) cmd_uninstall ;;
+    ""|help|-h|--help) usage ;;
+    *) die "неизвестная команда: ${cmd} (см. ezhik-lb help)" ;;
+  esac
+}
+
+main "$@"

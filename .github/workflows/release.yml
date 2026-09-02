@@ -1,0 +1,115 @@
+name: Release
+
+# Closes the gap docs/ROADMAP.md calls out under "Release pipeline": builds
+# the two artifacts install-node.sh, ezhik-lb update, and the Go agent's
+# self-updater (internal/agent/updater.go's ReleaseRepo) all assume exist
+# on GitHub Releases, and publishes them when a version tag is pushed.
+#
+#   git tag v1.0.1 && git push origin v1.0.1
+#
+# Asset names are load-bearing, not cosmetic — updater.go builds
+# "ezhiklb-node-agent_<version>_linux_amd64.tar.gz" from the tag itself,
+# and scripts/ezhik-lb / scripts/bootstrap-panel.sh build
+# "ezhiklb-<version>.tar.gz" the same way. Keep both in sync with this file.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  node-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: node-agent/go.sum
+      - name: Version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Test
+        working-directory: node-agent
+        run: go test ./...
+      - name: Build linux/amd64 binary
+        working-directory: node-agent
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ezhiklb-agent ./cmd/ezhiklb-agent
+      - name: Package
+        working-directory: node-agent
+        run: |
+          set -euo pipefail
+          asset="ezhiklb-node-agent_${{ steps.version.outputs.value }}_linux_amd64.tar.gz"
+          tar -czf "../${asset}" ezhiklb-agent
+          cd ..
+          sha256sum "${asset}" > "${asset}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-agent-release
+          path: |
+            ezhiklb-node-agent_*.tar.gz
+            ezhiklb-node-agent_*.tar.gz.sha256
+          retention-days: 1
+
+  panel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+      - name: Version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Test panel
+        working-directory: panel
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet -r requirements.txt -r requirements-dev.txt
+          .venv/bin/python -m pytest -q
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Package bundle
+        run: |
+          set -euo pipefail
+          bundle="/tmp/ezhiklb-bundle"
+          mkdir -p "${bundle}/panel" "${bundle}/web/dist" "${bundle}/scripts" "${bundle}/docker"
+          cp -a panel/. "${bundle}/panel/"
+          rm -rf "${bundle}/panel/.venv" "${bundle}/panel/tests" "${bundle}/panel/__pycache__" "${bundle}"/panel/*.db
+          cp -a web/dist/. "${bundle}/web/dist/"
+          cp -a scripts/. "${bundle}/scripts/"
+          cp -a docker/. "${bundle}/docker/"
+          cp docker-compose.yml "${bundle}/"
+          tar -czf "ezhiklb-${{ steps.version.outputs.value }}.tar.gz" -C "${bundle}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-release
+          path: ezhiklb-*.tar.gz
+          retention-days: 1
+
+  publish:
+    needs: [node-agent, panel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
