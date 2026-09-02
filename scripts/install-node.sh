@@ -10,7 +10,7 @@
 #   sudo ./install-node.sh --docker     # Docker container instead
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.3"
+EZHIKLB_VERSION="1.0.4"
 MODE="systemd"
 [[ "${1:-}" == "--docker" ]] && MODE="docker"
 
@@ -87,6 +87,7 @@ if [[ "$MODE" == "docker" ]]; then
   command -v docker >/dev/null 2>&1 || die "docker is not installed — install Docker first (https://docs.docker.com/engine/install/)"
   log "Building the node-agent image"
   [[ -f "${BUNDLE_DIR}/docker/node-agent.Dockerfile" ]] || die "missing docker/node-agent.Dockerfile next to this script; use a release bundle"
+  [[ -x "${BUNDLE_DIR}/bin/ezhiklb-agent" ]] || die "missing bin/ezhiklb-agent next to this script; build it with 'cd node-agent && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags=\"-s -w\" -o ../bin/ezhiklb-agent ./cmd/ezhiklb-agent' or use a release bundle"
   docker build -t ezhiklb-node-agent:local -f "${BUNDLE_DIR}/docker/node-agent.Dockerfile" "$BUNDLE_DIR"
   docker rm -f ezhiklb-node >/dev/null 2>&1 || true
   log "Starting the node-agent container"

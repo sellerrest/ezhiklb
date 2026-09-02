@@ -48,4 +48,4 @@ def load_settings() -> Settings:
     )
 
 
-PANEL_VERSION = "1.0.3"
+PANEL_VERSION = "1.0.4"

@@ -18,6 +18,9 @@ web/node_modules/
 web/dist/
 *.tsbuildinfo
 
+# Local Go build output (e.g. bin/ezhiklb-agent for docker/node-agent.Dockerfile)
+/bin/
+
 # Local runtime data
 *.db
 *.db-journal

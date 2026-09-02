@@ -1,8 +1,15 @@
-# Builds the EzhikLB node agent as a static-ish Linux binary, then packages
-# it with the userspace tools it shells out to (ipvsadm, iptables, ip,
-# iputils-ping, conntrack) — the same tool set scripts/install-node.sh
-# installs for a bare-metal node. Run this container with:
+# Packages the already-built EzhikLB node-agent Linux binary with the
+# userspace tools it shells out to (ipvsadm, iptables, ip, iputils-ping,
+# conntrack) — the same tool set scripts/install-node.sh installs for a
+# bare-metal node. Does NOT build the binary from Go source: the build
+# context must already contain it at bin/ezhiklb-agent — either downloaded
+# from a GitHub Release (scripts/bootstrap-node.sh --docker does this for
+# you) or built locally with:
 #
+#   cd node-agent && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+#     go build -trimpath -ldflags="-s -w" -o ../bin/ezhiklb-agent ./cmd/ezhiklb-agent
+#
+# Run with:
 #   docker run -d --name ezhiklb-node --restart unless-stopped \
 #     --network host --cap-add NET_ADMIN --cap-add NET_RAW --cap-add NET_BROADCAST \
 #     -v /lib/modules:/lib/modules:ro \
@@ -15,18 +22,12 @@
 # (an unprivileged container cannot modprobe the host kernel) — see
 # scripts/install-node.sh's --docker path, which does this for you.
 
-FROM golang:1.24-bookworm AS build
-WORKDIR /src
-COPY node-agent/go.mod ./
-RUN go mod download 2>/dev/null || true
-COPY node-agent/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/ezhiklb-agent ./cmd/ezhiklb-agent
-
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ipvsadm iptables iproute2 iputils-ping conntrack ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/ezhiklb-agent /usr/local/bin/ezhiklb-agent
+COPY bin/ezhiklb-agent /usr/local/bin/ezhiklb-agent
+RUN chmod 0755 /usr/local/bin/ezhiklb-agent
 ENV EZHIKLB_AGENT_STATE=/var/lib/ezhiklb-agent/state.json \
     EZHIKLB_AGENT_ENROLL_DIR=/var/lib/ezhiklb-agent/enroll \
     EZHIKLB_AGENT_HOST=0.0.0.0 \
