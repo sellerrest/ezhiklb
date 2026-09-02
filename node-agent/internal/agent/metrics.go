@@ -28,6 +28,14 @@ type metricSample struct {
 // active-IP window it feeds doesn't need finer resolution than this.
 const activeIPsScanInterval = 30 * time.Second
 
+// activeClientIPsSource reports client IPs currently active on a data plane
+// the /proc/net/ip_vs_conn scan below can't see — namely the L7 proxy
+// (internal/agent.Reconciler.ActiveClientIPs), since SNI/HTTP-routed Ядра
+// never touch IPVS at all.
+type activeClientIPsSource interface {
+	ActiveClientIPs() map[string]struct{}
+}
+
 // MetricsCollector keeps only a one-minute in-memory window. Nothing is
 // written to disk and the panel receives one aggregate with each heartbeat.
 type MetricsCollector struct {
@@ -36,10 +44,13 @@ type MetricsCollector struct {
 	seenIPs           map[string]time.Time
 	lastActiveIPsScan time.Time
 	now               func() time.Time
+	l7                activeClientIPsSource
 }
 
-func NewMetricsCollector() *MetricsCollector {
-	return &MetricsCollector{seenIPs: make(map[string]time.Time), now: time.Now}
+// NewMetricsCollector's l7 may be nil (e.g. in tests that don't care about
+// active-IP accounting) — its IPs simply won't be folded in.
+func NewMetricsCollector(l7 activeClientIPsSource) *MetricsCollector {
+	return &MetricsCollector{seenIPs: make(map[string]time.Time), now: time.Now, l7: l7}
 }
 
 func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
@@ -53,12 +64,13 @@ func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
 	ram, err := readRAM("/proc/meminfo")
 	if err != nil { return domain.NodeMetrics{}, err }
 	load := readLoad("/proc/loadavg")
-	if now.Sub(c.lastActiveIPsScan) >= activeIPsScanInterval {
-		for _, address := range readActiveIPVSClients("/proc/net/ip_vs_conn") { c.seenIPs[address] = now }
-		c.lastActiveIPsScan = now
+	scanDue := now.Sub(c.lastActiveIPsScan) >= activeIPsScanInterval
+	var ipvsClients []string
+	if scanDue {
+		ipvsClients = readActiveIPVSClients("/proc/net/ip_vs_conn")
 	}
+	activeIPs := c.updateActiveIPs(now, scanDue, ipvsClients)
 	cutoff := now.Add(-time.Minute)
-	for address, seen := range c.seenIPs { if seen.Before(cutoff) { delete(c.seenIPs, address) } }
 
 	current := metricSample{at: now, cpuTotal: cpuTotal, cpuIdle: cpuIdle, rxBytes: rx, txBytes: tx}
 	c.samples = append(c.samples, current)
@@ -74,7 +86,32 @@ func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
 		if rx >= base.rxBytes { rxBPS = uint64(float64(rx-base.rxBytes) / elapsed) }
 		if tx >= base.txBytes { txBPS = uint64(float64(tx-base.txBytes) / elapsed) }
 	}
-	return domain.NodeMetrics{RAMUsedPercent: ram, CPUUsedPercent: cpuPercent, Load1: load, CPUCores: runtime.NumCPU(), NetworkRxBPS: rxBPS, NetworkTxBPS: txBPS, ActiveIPs: len(c.seenIPs), CollectedAt: now}, nil
+	return domain.NodeMetrics{RAMUsedPercent: ram, CPUUsedPercent: cpuPercent, Load1: load, CPUCores: runtime.NumCPU(), NetworkRxBPS: rxBPS, NetworkTxBPS: txBPS, ActiveIPs: activeIPs, CollectedAt: now}, nil
+}
+
+// updateActiveIPs merges freshly-scanned IPVS conntrack clients (only when
+// scannedIPVS — the scan itself is rate-limited by activeIPsScanInterval,
+// see Collect) and the L7 proxy's currently-connected clients into the
+// one-minute seenIPs window, evicts anything older than that window, and
+// returns the resulting distinct count. Split out from Collect() so this
+// OS-independent bookkeeping can be unit tested without needing real /proc
+// files — Collect()'s other reads (CPU/RAM/network) only work on Linux.
+func (c *MetricsCollector) updateActiveIPs(now time.Time, scannedIPVS bool, ipvsClients []string) int {
+	if scannedIPVS {
+		for _, address := range ipvsClients { c.seenIPs[address] = now }
+		c.lastActiveIPsScan = now
+	}
+	// L7 tracking is already live in-memory (no file I/O), so it's folded in
+	// on every call rather than rate-limited like the IPVS scan — an
+	// actively connected client's timestamp keeps advancing every heartbeat;
+	// the moment it actually disconnects, this simply stops re-adding it and
+	// the cutoff below ages it out within a minute, same as the IPVS side.
+	if c.l7 != nil {
+		for address := range c.l7.ActiveClientIPs() { c.seenIPs[address] = now }
+	}
+	cutoff := now.Add(-time.Minute)
+	for address, seen := range c.seenIPs { if seen.Before(cutoff) { delete(c.seenIPs, address) } }
+	return len(c.seenIPs)
 }
 
 func readCPU(path string) (uint64, uint64, error) {

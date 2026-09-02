@@ -13,6 +13,7 @@ import (
 type runningRouter interface {
 	updateBindings([]compiledBinding)
 	stats() map[string]OutboundStat
+	clientIPs() map[string]struct{}
 	close() error
 }
 
@@ -155,6 +156,24 @@ func (m *Manager) Stats() map[string]OutboundStat {
 			existing.BytesRx += stat.BytesRx
 			existing.BytesTx += stat.BytesTx
 			result[outboundID] = existing
+		}
+	}
+	return result
+}
+
+// ActiveClientIPs unions the distinct client IPs with at least one live
+// connection through any L7 (SNI/HTTP-routed) listener right now. IPVS never
+// sees this traffic — it's a separate data plane — so the node-wide
+// "active IPs" metric (MetricsCollector, scanning /proc/net/ip_vs_conn)
+// folds this in too, or a node running only SNI/HTTP-routed Ядра would
+// always read 0 online no matter how many real clients are connected.
+func (m *Manager) ActiveClientIPs() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[string]struct{})
+	for _, current := range m.routers {
+		for ip := range current.router.clientIPs() {
+			result[ip] = struct{}{}
 		}
 	}
 	return result

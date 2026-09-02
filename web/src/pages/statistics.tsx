@@ -5,6 +5,7 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from "recharts"
 import { NodeDetailsDialog } from "@/components/node-dialogs"
 import { NodeStatsLine } from "@/components/node-stats-line"
 import PageHeader from "@/components/layout/page-header"
+import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api } from "@/lib/api"
@@ -94,6 +95,7 @@ export default function StatisticsPage({
   const [history, setHistory] = useState<NodeMetricPoint[]>([])
   const [selectedNode, setSelectedNode] = useState<NodeInfo | null>(null)
 
+  const errorNodes = nodes.filter((node) => Boolean(node.apply_error) || node.apply_state === "error").length
   const deadNodes = Math.max(0, (status?.nodes ?? 0) - (status?.online_nodes ?? 0))
   const aliveOutbounds = outbounds.filter((o) => o.status === "alive").length
   const deadOutbounds = outbounds.filter((o) => o.status === "dead").length
@@ -132,6 +134,38 @@ export default function StatisticsPage({
         <MetricCard label="Ноды мертвые" value={String(deadNodes)} icon={Server} />
         <MetricCard label="Мертвые исходящие" value={String(deadOutbounds)} icon={XCircle} />
         <MetricCard label="Общий исходящий трафик" value={formatNetworkRate(totalTx)} icon={ArrowUp} />
+      </div>
+
+      <div className="px-4">
+        <Card className="flex flex-col gap-3 p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-muted-foreground text-xs font-semibold uppercase">Система</p>
+              <h2 className="text-sm font-semibold">Состояние EzhikLB</h2>
+            </div>
+            <Badge variant={errorNodes ? "destructive" : "green"}>{errorNodes ? `${errorNodes} ошибок` : "всё работает"}</Badge>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <div>
+              <div className="text-muted-foreground text-xs">Панель</div>
+              <div className="font-semibold">{status?.version || "—"}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs">Связь с нодами</div>
+              <div className="font-semibold">
+                {status?.online_nodes ?? 0} из {status?.nodes ?? 0}
+              </div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs">Ядра</div>
+              <div className="font-semibold">{status?.cores ?? 0}</div>
+            </div>
+            <div>
+              <div className="text-muted-foreground text-xs">Ошибки применения</div>
+              <div className="font-semibold">{errorNodes}</div>
+            </div>
+          </div>
+        </Card>
       </div>
 
       <div className="px-4">

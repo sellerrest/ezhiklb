@@ -1,4 +1,4 @@
-import { Boxes, Hexagon, LayoutDashboard, ScrollText, Server, Settings } from "lucide-react"
+import { Boxes, Hexagon, LayoutDashboard, ScrollText, Server } from "lucide-react"
 
 import { ThemeToggle } from "@/components/common/theme-toggle"
 import { NavMain, type NavItem } from "@/components/layout/nav-main"
@@ -16,7 +16,6 @@ const nodesGroupItems = [
 const navItems: NavItem[] = [
   { title: "Статистика", url: "/", icon: LayoutDashboard },
   { title: "Узлы", url: nodesGroupItems[0].url, icon: Server, items: nodesGroupItems },
-  { title: "Настройки", url: "/settings", icon: Settings },
 ]
 
 export function AppSidebar({ subtitle, version, onLogout, ...props }: React.ComponentProps<typeof Sidebar> & { subtitle: string; version: string; onLogout: () => void }) {

@@ -17,7 +17,7 @@ func newTestServer(t *testing.T) (*Server, *fakeRunner) {
 	runner := &fakeRunner{}
 	reconciler := NewReconciler(context.Background(), runner, filepath.Join(t.TempDir(), "state.json"), nil)
 	monitor := NewHealthMonitor(reconciler, nil)
-	metrics := NewMetricsCollector()
+	metrics := NewMetricsCollector(reconciler)
 	server := NewServer(context.Background(), runner, reconciler, monitor, metrics, "test-api-key-0123456789", "1.0.0", nil)
 	return server, runner
 }

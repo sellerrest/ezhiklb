@@ -88,6 +88,5 @@ export const api = {
   metricHistory: (nodeID = "all") => requestArray<NodeMetricPoint>(`/api/v1/metrics/history?node_id=${encodeURIComponent(nodeID)}`),
   events: (filter = "all") => requestArray<AuditEvent>(`/api/v1/events?filter=${encodeURIComponent(filter)}`),
   settings: () => request<SystemSettings>("/api/v1/settings"),
-  updateSettings: (settings: SystemSettings) => request<{ settings: SystemSettings; restarting: boolean }>("/api/v1/settings", { method: "PUT", body: JSON.stringify(settings) }),
   assignCore: (nodeID: string, coreID: string) => request<void>(`/api/v1/nodes/${nodeID}/profile`, { method: "PUT", body: JSON.stringify({ core_id: coreID }) }),
 }

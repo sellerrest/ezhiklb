@@ -19,6 +19,20 @@ const sniffTimeout = 3 * time.Second
 
 const maxSniffBytes = 16 * 1024
 
+// tcpKeepAlivePeriod bounds how long a silently-vanished peer (network
+// drop, crashed client — anything that never sends a proper FIN) can keep a
+// spliced connection, and the "online" IP count it holds up, stuck. Without
+// keepalive, an idle net.Conn's Read blocks forever: TCP itself only
+// notices a dead peer when it actually tries to send something.
+const tcpKeepAlivePeriod = 15 * time.Second
+
+func enableKeepAlive(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(tcpKeepAlivePeriod)
+	}
+}
+
 // tcpRouter owns one raw-TCP listener for one Inbound. It never terminates
 // TLS — it only peeks the plaintext ClientHello that precedes the
 // handshake, extracts SNI, picks a target, and then splices bytes in both
@@ -63,6 +77,10 @@ func (t *tcpRouter) start(ctx context.Context, addr string) error {
 // satisfies the runningRouter stats accessor Manager.Stats() uses.
 func (t *tcpRouter) stats() map[string]OutboundStat { return t.conns.snapshot() }
 
+// clientIPs reports the distinct client IPs currently connected through
+// this router — satisfies runningRouter for Manager.ActiveClientIPs().
+func (t *tcpRouter) clientIPs() map[string]struct{} { return t.conns.allIPs() }
+
 func (t *tcpRouter) close() error {
 	if t.listener == nil {
 		return nil
@@ -89,6 +107,7 @@ func (t *tcpRouter) serve(ctx context.Context) {
 
 func (t *tcpRouter) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	enableKeepAlive(conn)
 
 	sni, peeked := t.sniff(conn)
 	binding, ok := t.selectBinding(sni)
@@ -110,6 +129,7 @@ func (t *tcpRouter) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	defer upstream.Close()
+	enableKeepAlive(upstream)
 
 	clientIP := remoteIP(conn.RemoteAddr())
 	t.conns.inc(target.OutboundID)

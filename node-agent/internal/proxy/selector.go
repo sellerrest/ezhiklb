@@ -79,6 +79,22 @@ func (c *connCounters) ipCount(outboundID string) int {
 	return len(c.ips[outboundID])
 }
 
+// allIPs unions every distinct client IP currently counted across all
+// outbounds this counter set tracks — a client connected to two outbounds
+// through the same router counts once, not twice. Feeds the node-wide
+// active-IPs metric (see Manager.ActiveClientIPs).
+func (c *connCounters) allIPs() map[string]struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := make(map[string]struct{})
+	for _, byIP := range c.ips {
+		for ip := range byIP {
+			result[ip] = struct{}{}
+		}
+	}
+	return result
+}
+
 func (c *connCounters) bytesCounter(m map[string]*int64, outboundID string) *int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()

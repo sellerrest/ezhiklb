@@ -189,6 +189,12 @@ func TestManagerStatsTracksLiveConnectionsAndIPs(t *testing.T) {
 	if got := manager.Stats()["outA"]; got.ActiveIPs != 1 {
 		t.Fatalf("mid-connection stats = %+v, want 1 active IP", got)
 	}
+	// Manager.ActiveClientIPs() feeds the node-wide "active IPs" metric
+	// (MetricsCollector) — it must see this connection too, since IPVS's own
+	// /proc/net/ip_vs_conn scan never will (this traffic never touches IPVS).
+	if ips := manager.ActiveClientIPs(); len(ips) != 1 {
+		t.Fatalf("mid-connection ActiveClientIPs() = %v, want exactly 1 IP", ips)
+	}
 
 	extraPayload := []byte("extra-client-traffic-payload-1234567890")
 	if _, err := conn.Write(extraPayload); err != nil {
@@ -212,6 +218,9 @@ func TestManagerStatsTracksLiveConnectionsAndIPs(t *testing.T) {
 	waitFor(0)
 	if got := manager.Stats()["outA"]; got.ActiveIPs != 0 {
 		t.Fatalf("after closing: stats = %+v, want zero IPs", got)
+	}
+	if ips := manager.ActiveClientIPs(); len(ips) != 0 {
+		t.Fatalf("after closing: ActiveClientIPs() = %v, want none", ips)
 	}
 }
 

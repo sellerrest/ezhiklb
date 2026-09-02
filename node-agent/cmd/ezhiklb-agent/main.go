@@ -25,7 +25,7 @@ import (
 	"ezhiklb-node-agent/internal/agent"
 )
 
-const version = "1.0.7"
+const version = "1.0.8"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -47,7 +47,7 @@ func main() {
 	reconciler := agent.NewReconciler(ctx, runner, statePath, logger)
 	monitor := agent.NewHealthMonitor(reconciler, logger)
 	reconciler.AttachHealthMonitor(monitor)
-	metrics := agent.NewMetricsCollector()
+	metrics := agent.NewMetricsCollector(reconciler)
 
 	// Rebuild the last committed data plane before anything else — this is
 	// what keeps traffic flowing indefinitely through a panel outage or a

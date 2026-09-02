@@ -104,6 +104,10 @@ func (h *httpRouter) start(ctx context.Context, addr string) error {
 // satisfies the runningRouter stats accessor Manager.Stats() uses.
 func (h *httpRouter) stats() map[string]OutboundStat { return h.conns.snapshot() }
 
+// clientIPs reports the distinct client IPs currently connected through
+// this router — satisfies runningRouter for Manager.ActiveClientIPs().
+func (h *httpRouter) clientIPs() map[string]struct{} { return h.conns.allIPs() }
+
 func (h *httpRouter) close() error {
 	if h.server == nil {
 		return nil

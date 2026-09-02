@@ -9,7 +9,6 @@ import CoresPage from "@/pages/cores"
 import EventsPage from "@/pages/events"
 import LoginPage from "@/pages/login"
 import NodesPage from "@/pages/nodes"
-import SettingsPage from "@/pages/settings"
 import StatisticsPage from "@/pages/statistics"
 import type { BackendHealth, Core, NodeInfo, OutboundStatusEntry, ServiceStat, Status, SystemSettings } from "@/types"
 
@@ -89,7 +88,6 @@ export default function App() {
           <Route path="/cores/new" element={<CoreEditorPage cores={cores} nodes={nodes} onChanged={load} />} />
           <Route path="/cores/:id" element={<CoreEditorPage cores={cores} nodes={nodes} onChanged={load} />} />
           <Route path="/events" element={<EventsPage nodes={nodes} cores={cores} />} />
-          <Route path="/settings" element={<SettingsPage current={settings} status={status} nodes={nodes} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

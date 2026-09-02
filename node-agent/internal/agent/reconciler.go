@@ -331,6 +331,14 @@ func (r *Reconciler) ProxyStats() []OutboundStat {
 	return result
 }
 
+// ActiveClientIPs reports the distinct client IPs currently connected
+// through the L7 proxy (TCP/HTTP-routed Ядра) — see
+// proxy.Manager.ActiveClientIPs for why the node-wide active-IPs metric
+// needs this folded in alongside IPVS's own conntrack-derived set.
+func (r *Reconciler) ActiveClientIPs() map[string]struct{} {
+	return r.proxyManager.ActiveClientIPs()
+}
+
 // Decommission removes only services and firewall rules managed by EzhikLB.
 // Unrelated IPVS services and host firewall rules remain untouched.
 func (r *Reconciler) Decommission(ctx context.Context) error {
