@@ -1,7 +1,10 @@
 # Packages the already-built EzhikLB node-agent Linux binary with the
 # userspace tools it shells out to (ipvsadm, iptables, ip, iputils-ping,
-# conntrack) — the same tool set scripts/install-node.sh installs for a
-# bare-metal node. Does NOT build the binary from Go source: the build
+# conntrack, sysctl) — the same tool set scripts/install-node.sh installs
+# for a bare-metal node, plus procps: unlike a normal Debian/Ubuntu VPS,
+# debian:bookworm-slim doesn't ship sysctl by default, and configureKernel()
+# needs it before it ever gets to applying firewall rules. Does NOT build
+# the binary from Go source: the build
 # context must already contain it at bin/ezhiklb-agent — either downloaded
 # from a GitHub Release (scripts/bootstrap-node.sh --docker does this for
 # you) or built locally with:
@@ -24,7 +27,7 @@
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ipvsadm iptables iproute2 iputils-ping conntrack ca-certificates \
+      ipvsadm iptables iproute2 iputils-ping conntrack ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 COPY bin/ezhiklb-agent /usr/local/bin/ezhiklb-agent
 RUN chmod 0755 /usr/local/bin/ezhiklb-agent
