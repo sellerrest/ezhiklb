@@ -10,7 +10,7 @@
 #   sudo ./install-node.sh --docker     # Docker container instead
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.2"
+EZHIKLB_VERSION="1.0.3"
 MODE="systemd"
 [[ "${1:-}" == "--docker" ]] && MODE="docker"
 
@@ -33,6 +33,19 @@ tty_read() {
   fi
 }
 
+# Fresh cloud VPS images commonly run apt-get in the background on first
+# boot (cloud-init, unattended-upgrades) and hold the dpkg/apt lock for a
+# while — retry instead of failing a one-click install outright.
+apt_get_retry() {
+  local attempt=1 max_attempts=60
+  until apt-get "$@"; do
+    (( attempt >= max_attempts )) && die "apt-get $1 продолжает падать — похоже, apt/dpkg завис у другого процесса (проверьте 'ps aux | grep apt')"
+    log "apt/dpkg занят другим процессом, повтор через 5с... (${attempt}/${max_attempts})"
+    sleep 5
+    attempt=$(( attempt + 1 ))
+  done
+}
+
 [[ "${EUID}" -eq 0 ]] || die "run this installer as root"
 [[ -r /etc/os-release ]] || die "unsupported operating system"
 . /etc/os-release
@@ -47,8 +60,8 @@ fi
 
 log "Loading kernel modules on the host (required even for the Docker path — an unprivileged container cannot modprobe the host kernel)"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ca-certificates curl iproute2
+apt_get_retry update
+apt_get_retry install -y ca-certificates curl iproute2
 cat >/etc/modules-load.d/ezhiklb.conf <<'EOF'
 ip_vs
 ip_vs_rr
@@ -86,7 +99,7 @@ if [[ "$MODE" == "docker" ]]; then
   log "Waiting for the agent to generate its identity"
   for _ in {1..30}; do [[ -s "${ENROLL_DIR}/connection.txt" ]] && break; sleep 1; done
 else
-  apt-get install -y ipvsadm iptables iputils-ping conntrack
+  apt_get_retry install -y ipvsadm iptables iputils-ping conntrack
   [[ -x "${BUNDLE_DIR}/bin/ezhiklb-agent" ]] || die "missing bin/ezhiklb-agent next to this script; build it with 'cd node-agent && go build -o ../bin/ezhiklb-agent ./cmd/ezhiklb-agent' or use a release bundle"
   log "Installing the node agent binary"
   install -d -m 0755 -o root -g root "${PREFIX}/bin"

@@ -5,7 +5,7 @@
 # see docs/ARCHITECTURE.md for the expected bundle layout.
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.2"
+EZHIKLB_VERSION="1.0.3"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -27,6 +27,19 @@ tty_read() {
   if ! { read -r "$@" < /dev/tty; } 2>/dev/null; then
     die "нет терминала для интерактивного ввода — задайте соответствующие переменные окружения (EZHIKLB_HOST/EZHIKLB_PORT/EZHIKLB_DATABASE_URL) для неинтерактивной установки"
   fi
+}
+
+# Fresh cloud VPS images commonly run apt-get in the background on first
+# boot (cloud-init, unattended-upgrades) and hold the dpkg/apt lock for a
+# while — retry instead of failing a one-click install outright.
+apt_get_retry() {
+  local attempt=1 max_attempts=60
+  until apt-get "$@"; do
+    (( attempt >= max_attempts )) && die "apt-get $1 продолжает падать — похоже, apt/dpkg завис у другого процесса (проверьте 'ps aux | grep apt')"
+    log "apt/dpkg занят другим процессом, повтор через 5с... (${attempt}/${max_attempts})"
+    sleep 5
+    attempt=$(( attempt + 1 ))
+  done
 }
 
 detect_server_ipv4() {
@@ -104,8 +117,8 @@ fi
 
 log "Installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ca-certificates curl openssl python3 python3-venv python3-pip
+apt_get_retry update
+apt_get_retry install -y ca-certificates curl openssl python3 python3-venv python3-pip
 
 if [[ -n "$EXISTING_VERSION" ]]; then
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
