@@ -23,6 +23,16 @@ BUNDLE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 log() { printf '\n\033[1;36mEzhikLB node\033[0m %s\n' "$*"; }
 die() { printf '\nEzhikLB node installer error: %s\n' "$*" >&2; exit 1; }
 
+# Reads a prompt from the controlling terminal, never from stdin: when this
+# script runs as `curl ... | sudo bash`, stdin is the pipe itself, and bash
+# can leave unread tail bytes of that very script sitting in it — a plain
+# `read` would consume those bytes as if they were the user's answer.
+tty_read() {
+  if ! { read -r "$@" < /dev/tty; } 2>/dev/null; then
+    die "нет терминала для интерактивного ввода — задайте EZHIKLB_AGENT_PORT для неинтерактивной установки"
+  fi
+}
+
 [[ "${EUID}" -eq 0 ]] || die "run this installer as root"
 [[ -r /etc/os-release ]] || die "unsupported operating system"
 . /etc/os-release
@@ -30,7 +40,7 @@ case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported
 
 control_port="${EZHIKLB_AGENT_PORT:-62050}"
 if [[ -z "${EZHIKLB_AGENT_PORT:-}" ]]; then
-  read -r -p "Порт локального API агента [${control_port}]: " answer
+  tty_read -p "Порт локального API агента [${control_port}]: " answer
   control_port="${answer:-$control_port}"
 fi
 [[ "$control_port" =~ ^[0-9]+$ ]] && (( control_port >= 1 && control_port <= 65535 )) || die "порт должен быть числом от 1 до 65535"

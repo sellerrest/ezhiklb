@@ -19,6 +19,16 @@ BACKUP_ROOT="/var/backups/ezhiklb"
 log() { printf '\n\033[1;36mEzhikLB panel\033[0m %s\n' "$*"; }
 die() { printf '\nEzhikLB panel installer error: %s\n' "$*" >&2; exit 1; }
 
+# Reads a prompt from the controlling terminal, never from stdin: when this
+# script runs as `curl ... | sudo bash`, stdin is the pipe itself, and bash
+# can leave unread tail bytes of that very script sitting in it — a plain
+# `read` would consume those bytes as if they were the user's answer.
+tty_read() {
+  if ! { read -r "$@" < /dev/tty; } 2>/dev/null; then
+    die "нет терминала для интерактивного ввода — задайте соответствующие переменные окружения (EZHIKLB_HOST/EZHIKLB_PORT/EZHIKLB_DATABASE_URL) для неинтерактивной установки"
+  fi
+}
+
 detect_server_ipv4() {
   local detected=""
   if command -v ip >/dev/null 2>&1; then
@@ -52,14 +62,14 @@ if [[ -z "$EXISTING_VERSION" && -z "${EZHIKLB_HOST:-}" ]]; then
   printf '\nКак открыть панель?\n'
   printf '  1) Только на сервере и через SSH-туннель (127.0.0.1) — рекомендуется\n'
   printf '  2) По сети (0.0.0.0, открывает web-интерфейс извне)\n'
-  read -r -p 'Доступ [1]: ' panel_access
+  tty_read -p 'Доступ [1]: ' panel_access
   case "${panel_access:-1}" in 1) panel_host="127.0.0.1" ;; 2) panel_host="0.0.0.0" ;; *) die "неверный вариант доступа" ;; esac
 fi
 
 panel_port="${EZHIKLB_PORT:-8080}"
 if [[ -z "$EXISTING_VERSION" ]]; then
   while true; do
-    read -r -p "Порт web-панели [${panel_port}]: " answer
+    tty_read -p "Порт web-панели [${panel_port}]: " answer
     answer="${answer:-$panel_port}"
     if ! valid_tcp_port "$answer"; then printf 'Порт должен быть числом от 1024 до 65535.\n' >&2; continue; fi
     if tcp_port_in_use "$answer"; then printf 'Порт %s уже используется.\n' "$answer" >&2; continue; fi
@@ -75,15 +85,15 @@ if [[ -z "$EXISTING_VERSION" && -z "$database_url" ]]; then
   printf '\nВыберите базу данных:\n'
   printf '  1) SQLite (по умолчанию, для одного сервера)\n'
   printf '  2) PostgreSQL (для отдельного развёртывания БД)\n'
-  read -r -p 'База данных [1]: ' db_choice
+  tty_read -p 'База данных [1]: ' db_choice
   case "${db_choice:-1}" in
     1) database_url="sqlite+aiosqlite://${DATA_DIR}/ezhiklb.db" ;;
     2)
-      read -r -p 'PostgreSQL хост [127.0.0.1]: ' pg_host; pg_host="${pg_host:-127.0.0.1}"
-      read -r -p 'PostgreSQL порт [5432]: ' pg_port; pg_port="${pg_port:-5432}"
-      read -r -p 'PostgreSQL база данных [ezhiklb]: ' pg_db; pg_db="${pg_db:-ezhiklb}"
-      read -r -p 'PostgreSQL пользователь [ezhiklb]: ' pg_user; pg_user="${pg_user:-ezhiklb}"
-      read -r -s -p 'PostgreSQL пароль: ' pg_password; printf '\n'
+      tty_read -p 'PostgreSQL хост [127.0.0.1]: ' pg_host; pg_host="${pg_host:-127.0.0.1}"
+      tty_read -p 'PostgreSQL порт [5432]: ' pg_port; pg_port="${pg_port:-5432}"
+      tty_read -p 'PostgreSQL база данных [ezhiklb]: ' pg_db; pg_db="${pg_db:-ezhiklb}"
+      tty_read -p 'PostgreSQL пользователь [ezhiklb]: ' pg_user; pg_user="${pg_user:-ezhiklb}"
+      tty_read -s -p 'PostgreSQL пароль: ' pg_password; printf '\n'
       [[ -n "$pg_password" ]] || die "пароль PostgreSQL не может быть пустым"
       database_url="postgresql+asyncpg://${pg_user}:${pg_password}@${pg_host}:${pg_port}/${pg_db}"
       ;;
