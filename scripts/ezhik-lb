@@ -104,7 +104,10 @@ cmd_admins() {
   if using_docker; then
     docker compose -f "$COMPOSE_FILE" exec -T panel python -m ezhiklb_panel.admin_cli "$@"
   else
-    "${PREFIX}/venv/bin/python" -m ezhiklb_panel.admin_cli "$@"
+    # `-m` resolves ezhiklb_panel via the current working directory (it's
+    # not pip-installed as a package) — same reason the systemd unit sets
+    # WorkingDirectory=${PREFIX}/panel for `python -m ezhiklb_panel.main`.
+    ( cd "${PREFIX}/panel" && "${PREFIX}/venv/bin/python" -m ezhiklb_panel.admin_cli "$@" )
   fi
 }
 
