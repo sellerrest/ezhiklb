@@ -264,3 +264,31 @@ def _fake_cert() -> str:
         "MIIBIjCB1qADAgECAhQtest\n"
         "-----END CERTIFICATE-----\n"
     )
+
+
+async def test_migrate_backfills_nodes_columns_on_a_pre_existing_table(tmp_path):
+    """A real deployment hit `table nodes has no column named control_address`
+    after upgrading panel code on top of a database whose `nodes` table
+    predated the control-API/TLS-pinning node model — CREATE TABLE IF NOT
+    EXISTS is a no-op once the table already exists, so those columns never
+    appeared. migrate() must backfill them via ensure_column instead."""
+    from sqlalchemy import text
+
+    db_path = tmp_path / f"{uuid.uuid4().hex}.db"
+    db = Database(f"sqlite+aiosqlite:///{db_path}")
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
+                "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+            )
+        )
+    await db.migrate()
+
+    s = Store(db)
+    await s.bootstrap()
+    cores = await s.list_cores()
+    node = await s.create_node("old-schema-node", "203.0.113.20", "203.0.113.20", 62050, "key", _fake_cert(), cores[0].id)
+    assert node.control_address == "203.0.113.20"
+    assert node.control_port == 62050
+    await db.close()

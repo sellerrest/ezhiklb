@@ -204,11 +204,49 @@ class Database:
             for statement in statements:
                 await conn.execute(text(statement))
 
-            # Per-node overrides added after the initial schema — additive,
-            # so existing databases pick them up via ensure_column instead
-            # of a migration-file ladder (mirrors store.go's ensureColumn).
-            await self.ensure_column(conn, "nodes", "poll_interval_seconds", "INTEGER")
-            await self.ensure_column(conn, "nodes", "timeout_seconds", "INTEGER")
+            # nodes columns beyond id/name/created_at/updated_at, backfilled
+            # via ensure_column too: a `nodes` table created by an older
+            # schema (e.g. before the control-API/TLS-pinning node model
+            # existed) predates most of these, and CREATE TABLE IF NOT
+            # EXISTS is a no-op once the table already exists — a real
+            # deployment hit exactly this as "table nodes has no column
+            # named control_address" after upgrading panel code on top of
+            # a pre-existing database.
+            for name, ddl_type in [
+                ("ingress_address", "TEXT NOT NULL DEFAULT ''"),
+                ("control_address", "TEXT NOT NULL DEFAULT ''"),
+                ("control_port", "INTEGER NOT NULL DEFAULT 0"),
+                ("api_key", "TEXT NOT NULL DEFAULT ''"),
+                ("cert_pem", "TEXT NOT NULL DEFAULT ''"),
+                ("cert_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+                ("core_id", "TEXT"),
+                ("desired_revision", "INTEGER NOT NULL DEFAULT 0"),
+                ("applied_revision", "INTEGER NOT NULL DEFAULT 0"),
+                ("agent_version", "TEXT NOT NULL DEFAULT ''"),
+                ("status", "TEXT NOT NULL DEFAULT 'connecting'"),
+                ("apply_state", "TEXT NOT NULL DEFAULT 'waiting'"),
+                ("apply_error", "TEXT NOT NULL DEFAULT ''"),
+                ("last_seen_at", "TEXT"),
+                ("online_since", "TEXT"),
+                ("ram_used_percent", "REAL NOT NULL DEFAULT 0"),
+                ("cpu_used_percent", "REAL NOT NULL DEFAULT 0"),
+                ("load_1", "REAL NOT NULL DEFAULT 0"),
+                ("cpu_cores", "INTEGER NOT NULL DEFAULT 0"),
+                ("network_rx_bps", "INTEGER NOT NULL DEFAULT 0"),
+                ("network_tx_bps", "INTEGER NOT NULL DEFAULT 0"),
+                ("active_ips", "INTEGER NOT NULL DEFAULT 0"),
+                ("metrics_collected_at", "TEXT"),
+                ("diagnostics_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("update_target", "TEXT NOT NULL DEFAULT ''"),
+                ("update_state", "TEXT NOT NULL DEFAULT 'idle'"),
+                ("update_error", "TEXT NOT NULL DEFAULT ''"),
+                ("reset_revision", "INTEGER NOT NULL DEFAULT 0"),
+                ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+                ("pending_delete", "INTEGER NOT NULL DEFAULT 0"),
+                ("poll_interval_seconds", "INTEGER"),
+                ("timeout_seconds", "INTEGER"),
+            ]:
+                await self.ensure_column(conn, "nodes", name, ddl_type)
             await self.ensure_column(conn, "outbound_stats", "bytes_rx", "INTEGER NOT NULL DEFAULT 0")
             await self.ensure_column(conn, "outbound_stats", "bytes_tx", "INTEGER NOT NULL DEFAULT 0")
             await self.ensure_column(conn, "outbound_stats", "rx_bps", "REAL NOT NULL DEFAULT 0")

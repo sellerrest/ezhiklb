@@ -41,4 +41,4 @@ export const updateStageInfo: Record<string, { percent: number; label: string }>
   restarting: { percent: 93, label: "Перезапуск агента…" },
 }
 
-export const releaseVersion = "1.0.4"
+export const releaseVersion = "1.0.5"
