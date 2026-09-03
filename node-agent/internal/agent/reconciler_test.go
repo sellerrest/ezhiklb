@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ezhiklb-node-agent/internal/domain"
 )
@@ -198,5 +199,32 @@ func TestReconcileAppliesL7ProxyForTCPInbounds(t *testing.T) {
 	}
 	if len(state.Config.Inbounds) != 1 || state.Config.Inbounds[0].ID != "in1" {
 		t.Fatalf("applied config did not persist the TCP inbound: %#v", state.Config)
+	}
+}
+
+// A real deployment hit an apply that never returned (an external command
+// stuck contending for a system-wide lock) and, because Services() shared
+// Reconcile()'s mu, every subsequent /v1/state poll's diagnostics call —
+// and every HealthMonitor tick, via Outbounds() — blocked right along with
+// it: the node looked permanently wedged in "applying", and nothing (sync,
+// reconnect, toggling the node) could ever reach it again. Services() (and
+// Outbounds/RestoredConfig, the same shape) must go through the separate
+// stateMu instead, so reading already-persisted state never waits on an
+// in-flight Reconcile() no matter how long that takes.
+func TestServicesDoesNotBlockOnAnInFlightReconcile(t *testing.T) {
+	r := newTestReconciler(&fakeRunner{}, filepath.Join(t.TempDir(), "state.json"))
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.Services()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Services() blocked on the Reconcile() lock instead of using the separate stateMu")
 	}
 }

@@ -10,7 +10,7 @@
 #   sudo ./install-node.sh --docker     # Docker container instead
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.13"
+EZHIKLB_VERSION="1.0.14"
 MODE="systemd"
 [[ "${1:-}" == "--docker" ]] && MODE="docker"
 

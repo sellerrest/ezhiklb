@@ -64,12 +64,31 @@ type AppliedState struct {
 	Config   domain.ProfileConfig `json:"config"`
 }
 
+// reconcileTimeout bounds a single Reconcile() call — every external
+// command it runs (iptables/ipvsadm/sysctl/ip, all exec.CommandContext-
+// wrapped) gets killed once this fires, so a stuck external lock (e.g. two
+// iptables invocations contending for the xtables lock) can't hold mu
+// forever and wedge every subsequent apply. A real, if pathological,
+// production deployment hit exactly this: an apply that never returned,
+// captive for good since nothing here previously bounded it.
+const reconcileTimeout = 60 * time.Second
+
 type Reconciler struct {
 	runner       Runner
 	statePath    string
 	logger       *slog.Logger
 	proxyManager *proxy.Manager
-	mu           sync.Mutex
+	// mu serializes whole Reconcile()/Restore()/Decommission() calls
+	// against each other — they mutate live IPVS/iptables/proxy state, so
+	// two can't run concurrently. stateMu is deliberately separate and
+	// only ever held briefly, for loadState()/saveState()'s file I/O: read-
+	// only accessors (Services, Outbounds, RestoredConfig — polled by every
+	// /v1/state request's diagnostics and by the health monitor) go through
+	// it instead of mu, so they never block for the full duration of an
+	// in-flight (possibly slow, or before this fix, possibly stuck-forever)
+	// Reconcile() call.
+	mu      sync.Mutex
+	stateMu sync.Mutex
 }
 
 // NewReconciler's ctx bounds the lifetime of every TCP/HTTP proxy listener
@@ -97,8 +116,6 @@ func (r *Reconciler) AttachHealthMonitor(monitor *HealthMonitor) {
 }
 
 func (r *Reconciler) Services() []Service {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	state, err := r.loadState()
 	if err != nil {
 		return nil
@@ -109,6 +126,13 @@ func (r *Reconciler) Services() []Service {
 func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredState) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Bounded independently of whatever the caller's ctx does — a stuck
+	// exec.CommandContext call (see reconcileTimeout's doc comment) must
+	// not be able to hold mu indefinitely regardless of how the HTTP
+	// handler above this got its context, or whether the client that
+	// triggered it ever notices the connection is stuck and gives up.
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	if err := desired.Config.Validate(); err != nil {
 		return fmt.Errorf("invalid desired revision: %w", err)
 	}
@@ -245,6 +269,8 @@ func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Se
 func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	state, err := r.loadState()
 	if err != nil {
 		return 0, err
@@ -282,8 +308,6 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 // StartHealthMonitor use this instead of a global HealthCheck field, since
 // health-check settings now live per-Outbound.
 func (r *Reconciler) RestoredConfig() domain.ProfileConfig {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	state, err := r.loadState()
 	if err != nil {
 		return domain.DefaultProfileConfig()
@@ -295,8 +319,6 @@ func (r *Reconciler) RestoredConfig() domain.ProfileConfig {
 // config — the live source HealthMonitor polls, so its per-outbound
 // interval/timeout/thresholds always reflect the most recent publish.
 func (r *Reconciler) Outbounds() []domain.Outbound {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	state, err := r.loadState()
 	if err != nil {
 		return nil
@@ -344,6 +366,8 @@ func (r *Reconciler) ActiveClientIPs() map[string]struct{} {
 func (r *Reconciler) Decommission(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 	old, err := r.loadState()
 	if err != nil {
 		return err
@@ -796,6 +820,8 @@ func (r *Reconciler) resolveIngress(ctx context.Context, configured string) (str
 }
 
 func (r *Reconciler) loadState() (AppliedState, error) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	var state AppliedState
 	data, err := os.ReadFile(r.statePath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -811,6 +837,8 @@ func (r *Reconciler) loadState() (AppliedState, error) {
 }
 
 func (r *Reconciler) saveState(state AppliedState) error {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(r.statePath), 0750); err != nil {
 		return err
 	}
