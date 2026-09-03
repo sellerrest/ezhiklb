@@ -114,7 +114,7 @@ cmd_admins() {
 cmd_update() {
   need_root
   command -v curl >/dev/null || die "нужен curl"
-  local current latest tmp release_json
+  local current latest release_json
   current="$( [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || echo 0.0.0 )"
   release_json="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null)" || release_json=""
   latest="$(printf '%s' "$release_json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
@@ -134,15 +134,26 @@ cmd_update() {
     return 0
   fi
 
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  log "скачиваю релиз $latest"
-  curl -fsSL "https://github.com/${REPO_SLUG}/releases/download/v${latest}/ezhiklb-${latest}.tar.gz" -o "${tmp}/release.tar.gz" \
-    || die "не удалось скачать релиз — проверьте, что релиз v${latest} содержит файл ezhiklb-${latest}.tar.gz"
-  tar -xzf "${tmp}/release.tar.gz" -C "$tmp"
-  [[ -x "${tmp}/scripts/install-panel.sh" ]] || die "в архиве релиза нет scripts/install-panel.sh"
-  log "устанавливаю $latest"
-  "${tmp}/scripts/install-panel.sh"
+  # A subshell so `trap ... EXIT` is scoped to just this block: `tmp` is
+  # local to this function, so it goes out of scope the moment cmd_update
+  # returns — a trap registered on RETURN or EXIT at the *outer* script
+  # level would still fire later (RETURN fires again on every subsequent
+  # function return, including main()'s own; EXIT fires at actual process
+  # exit) with `tmp` long gone, dying with "tmp: unbound variable" under
+  # set -u. A subshell's EXIT trap only ever fires once, when the subshell
+  # itself exits — so cleanup happens right here, whether cmd_update's
+  # caller ever returns or not.
+  (
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    log "скачиваю релиз $latest"
+    curl -fsSL "https://github.com/${REPO_SLUG}/releases/download/v${latest}/ezhiklb-${latest}.tar.gz" -o "${tmp}/release.tar.gz" \
+      || die "не удалось скачать релиз — проверьте, что релиз v${latest} содержит файл ezhiklb-${latest}.tar.gz"
+    tar -xzf "${tmp}/release.tar.gz" -C "$tmp"
+    [[ -x "${tmp}/scripts/install-panel.sh" ]] || die "в архиве релиза нет scripts/install-panel.sh"
+    log "устанавливаю $latest"
+    "${tmp}/scripts/install-panel.sh"
+  )
   log "обновлено до $latest"
 }
 
