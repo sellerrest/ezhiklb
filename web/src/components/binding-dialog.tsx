@@ -10,7 +10,6 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { cn } from "@/lib/utils"
 import type { Binding, BindingAction, BindingMode, Inbound, MatchCondition, MatchField, MatchOperator, Outbound, SelectionStrategy } from "@/types"
 
 const fieldLabels: Record<MatchField, string> = { sni: "SNI (хост)", path: "URI-путь" }
@@ -237,29 +236,19 @@ export function BindingDialog({
           )}
         </div>
 
-        {isDefault ? (
+        {isDefault && (
           <div className="flex flex-col gap-1.5">
-            <Label>Что делать с трафиком, не подошедшим ни под одно правило</Label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setAction("forward")}
-                className={cn("flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors", binding.action === "forward" ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground")}
-              >
-                Пересылать
-              </button>
-              <button
-                type="button"
-                onClick={() => setAction("drop")}
-                className={cn("flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors", binding.action === "drop" ? "border-destructive bg-destructive/10 text-destructive" : "text-muted-foreground")}
-              >
-                Drop Packet — сбросить соединение
-              </button>
-            </div>
-            {binding.action === "drop" && <span className="text-muted-foreground text-xs">Весь трафик, не подошедший ни под одно правило этого входящего, будет разрываться.</span>}
+            <Label>Дефолтное правило</Label>
+            <Select value={binding.action} onValueChange={(v) => setAction(v as BindingAction)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="drop">Drop Packet — сбросить соединение</SelectItem>
+                <SelectItem value="forward">Пересылать</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-        ) : (
-          <div className="text-muted-foreground rounded-lg border p-3 text-xs">Подходящий трафик всегда пересылается на выбранные исходящие — Drop доступен только у правила по умолчанию, для трафика без совпадений.</div>
         )}
 
         {binding.action === "forward" && (
