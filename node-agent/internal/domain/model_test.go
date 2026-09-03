@@ -123,6 +123,21 @@ func TestDropActionWithNoTargetsIsValid(t *testing.T) {
 	}
 }
 
+// Drop only makes sense on the default (empty-rule) binding — a rule with
+// real match conditions should always forward; there'd be no reason to
+// write a rule that matches specific traffic just to refuse it.
+func TestDropActionOnANonDefaultBindingIsRejected(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.Inbounds = []Inbound{{ID: "in1", Name: "Web", Enabled: true, ListenPort: 8002, TCP: true}}
+	config.Bindings = []Binding{{
+		ID: "b1", InboundID: "in1", Action: BindingActionDrop,
+		Groups: []MatchGroup{{Conditions: []MatchCondition{{Field: MatchFieldSNI, Operator: MatchOpEquals, Value: "blocked.example"}}}},
+	}}
+	if err := config.Validate(); err == nil {
+		t.Fatal("expected a drop-on-non-default-binding validation error")
+	}
+}
+
 func TestManualWeightsMustSumTo100(t *testing.T) {
 	config := DefaultProfileConfig()
 	config.Inbounds = []Inbound{{ID: "in1", Name: "Web", Enabled: true, ListenPort: 8002, TCP: true}}

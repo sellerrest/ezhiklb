@@ -56,7 +56,10 @@ export function BindingDialog({
   onSave: (binding: Binding) => void
   onClose: () => void
 }) {
-  const [binding, setBinding] = useState(initial)
+  // Drop only makes sense on the default (empty-groups) binding — normalize
+  // anything saved otherwise (e.g. from before this rule existed) so the UI
+  // never opens into an invalid state.
+  const [binding, setBinding] = useState(initial.groups.length > 0 && initial.action === "drop" ? { ...initial, action: "forward" as BindingAction } : initial)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const patch = (values: Partial<Binding>) => setBinding((current) => ({ ...current, ...values }))
   const inbound = inbounds.find((i) => i.id === binding.inbound_id)
@@ -80,7 +83,10 @@ export function BindingDialog({
     patch({ groups: binding.groups.map((group, i) => (i === gi ? { conditions: group.conditions.map((c, j) => (j === ci ? { ...c, ...values } : c)) } : group)) })
   const addCondition = (gi: number) => patch({ groups: binding.groups.map((group, i) => (i === gi ? { conditions: [...group.conditions, newCondition()] } : group)) })
   const removeCondition = (gi: number, ci: number) => patch({ groups: binding.groups.map((group, i) => (i === gi ? { conditions: group.conditions.filter((_, j) => j !== ci) } : group)) })
-  const addGroup = () => patch({ groups: [...binding.groups, { conditions: [newCondition()] }] })
+  // Drop only makes sense on the default (empty-groups) binding — the
+  // moment real conditions are added, this is no longer the default, so
+  // force it back to forward (the drop toggle disappears from the UI too).
+  const addGroup = () => patch({ groups: [...binding.groups, { conditions: [newCondition()] }], action: "forward" })
   const removeGroup = (gi: number) => patch({ groups: binding.groups.filter((_, i) => i !== gi) })
 
   const toggleTarget = (outboundId: string, checked: boolean) => {
@@ -231,26 +237,30 @@ export function BindingDialog({
           )}
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label>Что делать с подходящим трафиком</Label>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setAction("forward")}
-              className={cn("flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors", binding.action === "forward" ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground")}
-            >
-              Пересылать
-            </button>
-            <button
-              type="button"
-              onClick={() => setAction("drop")}
-              className={cn("flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors", binding.action === "drop" ? "border-destructive bg-destructive/10 text-destructive" : "text-muted-foreground")}
-            >
-              Drop Packet — сбросить соединение
-            </button>
+        {isDefault ? (
+          <div className="flex flex-col gap-1.5">
+            <Label>Что делать с трафиком, не подошедшим ни под одно правило</Label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setAction("forward")}
+                className={cn("flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors", binding.action === "forward" ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground")}
+              >
+                Пересылать
+              </button>
+              <button
+                type="button"
+                onClick={() => setAction("drop")}
+                className={cn("flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors", binding.action === "drop" ? "border-destructive bg-destructive/10 text-destructive" : "text-muted-foreground")}
+              >
+                Drop Packet — сбросить соединение
+              </button>
+            </div>
+            {binding.action === "drop" && <span className="text-muted-foreground text-xs">Весь трафик, не подошедший ни под одно правило этого входящего, будет разрываться.</span>}
           </div>
-          {isDefault && binding.action === "drop" && <span className="text-muted-foreground text-xs">Весь трафик, не подошедший ни под одно правило этого входящего, будет разрываться.</span>}
-        </div>
+        ) : (
+          <div className="text-muted-foreground rounded-lg border p-3 text-xs">Подходящий трафик всегда пересылается на выбранные исходящие — Drop доступен только у правила по умолчанию, для трафика без совпадений.</div>
+        )}
 
         {binding.action === "forward" && (
           <>

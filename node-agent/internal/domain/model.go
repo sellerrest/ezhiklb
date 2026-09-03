@@ -138,9 +138,12 @@ type BindingTarget struct {
 // may be this shape, since a non-default rule placed after it could never
 // be reached; it acts as that inbound's *default*, always evaluated last
 // regardless of list position (see proxy.Manager.Apply). Action decides
-// what happens to matching traffic: forward (the default) sends it to
-// Targets, sharing it per SelectionStrategy; drop resets the connection
-// immediately and Targets must be empty.
+// what the default does with traffic nothing more specific matched:
+// forward (the default action) sends it to Targets, sharing it per
+// SelectionStrategy; drop resets the connection immediately and Targets
+// must be empty. Drop only makes sense on the default — a binding with
+// real match conditions always forwards; there'd be no reason to write a
+// rule that matches specific traffic just to refuse it.
 type Binding struct {
 	ID                string            `json:"id"`
 	Name              string            `json:"name"`
@@ -451,6 +454,9 @@ func (c ProfileConfig) Validate() error {
 		}
 
 		if binding.Action == BindingActionDrop {
+			if len(binding.Groups) > 0 {
+				problems = append(problems, prefix+".action is drop but this binding has match conditions — drop only makes sense on the default (empty-rule) binding, for traffic that matched nothing else")
+			}
 			if len(binding.Targets) > 0 {
 				problems = append(problems, prefix+".targets must be empty when action is drop")
 			}

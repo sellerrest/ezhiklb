@@ -144,10 +144,14 @@ class Binding(BaseModel):
     An empty ``groups`` list means "match everything" — at most one binding
     per inbound may be this shape, since a non-default rule placed after it
     could never be reached; it acts as that inbound's *default*, always
-    evaluated last regardless of list position. ``action`` decides what
-    happens to matching traffic: FORWARD (the default) sends it to
-    ``targets``, sharing it per ``selection_strategy``; DROP resets the
-    connection immediately and ``targets`` must be empty."""
+    evaluated last regardless of list position. ``action`` decides what the
+    default does with traffic nothing more specific matched: FORWARD (the
+    default action) sends it to ``targets``, sharing it per
+    ``selection_strategy``; DROP resets the connection immediately and
+    ``targets`` must be empty. DROP only makes sense on the default — a
+    binding with real match conditions always forwards; there'd be no
+    reason to write a rule that matches specific traffic just to refuse
+    it."""
 
     id: str = ""
     name: str = ""
@@ -315,6 +319,8 @@ def validate_core_config(config: CoreConfig) -> None:
                     problems.append(f"{cond_prefix} matches path but binding {prefix} is not in http mode")
 
         if binding.action == BindingAction.DROP:
+            if binding.groups:
+                problems.append(f"{prefix}.action is drop but this binding has match conditions — drop only makes sense on the default (empty-rule) binding, for traffic that matched nothing else")
             if binding.targets:
                 problems.append(f"{prefix}.targets must be empty when action is drop")
         else:

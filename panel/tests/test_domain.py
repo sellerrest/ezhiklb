@@ -161,6 +161,25 @@ def test_drop_action_with_no_targets_is_valid():
     validate_core_config(config)
 
 
+def test_drop_action_on_a_non_default_binding_is_rejected():
+    """Drop only makes sense on the default (empty-rule) binding — a rule
+    with real match conditions should always forward; there'd be no reason
+    to write a rule that matches specific traffic just to refuse it."""
+    config = default_core_config()
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
+    config.bindings = [
+        Binding(
+            id="b1",
+            inbound_id="in1",
+            action=BindingAction.DROP,
+            groups=[MatchGroup(conditions=[MatchCondition(field=MatchField.SNI, value="blocked.example")])],
+            targets=[],
+        )
+    ]
+    with pytest.raises(CoreValidationError):
+        validate_core_config(config)
+
+
 @pytest.mark.parametrize(
     "left,right,want",
     [

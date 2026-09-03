@@ -224,12 +224,19 @@ func TestManagerStatsTracksLiveConnectionsAndIPs(t *testing.T) {
 	}
 }
 
-// A binding with action=drop must reset the connection outright — no
-// backend dial, no data relayed — rather than the ordinary "no matching
-// binding" outcome (also a close, but for a different reason: nothing at
-// all matched, versus something matched and explicitly said "refuse this").
-func TestManagerDropActionResetsConnectionWithoutDialingAnyBackend(t *testing.T) {
-	hello := captureClientHello(t, "blocked.example")
+// Drop only makes sense on the default (empty-groups) binding — domain.
+// ProfileConfig.Validate now rejects it on a binding with real match
+// conditions (a specific rule should always forward; there'd be no reason
+// to write a rule that matches specific traffic just to refuse it). This
+// proves the actual intended shape end-to-end: a specific SNI rule
+// forwards normally, and anything that matches nothing more specific — the
+// default — resets the connection outright, no backend dial, no data
+// relayed.
+func TestManagerDefaultDropRejectsUnmatchedTrafficWhileSpecificRuleStillForwards(t *testing.T) {
+	helloAllowed := captureClientHello(t, "allowed.example")
+	helloOther := captureClientHello(t, "unlisted.example")
+	backendAddr, backendPort, backendReceived := echoBackend(t, len(helloAllowed))
+
 	listenHost, listenPort := freeAddr(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -238,29 +245,53 @@ func TestManagerDropActionResetsConnectionWithoutDialingAnyBackend(t *testing.T)
 	cfg := domain.ProfileConfig{
 		SchemaVersion: domain.SchemaVersion,
 		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, TCP: true}},
+		Outbounds:     []domain.Outbound{{ID: "outA", Name: "A", Address: backendAddr, Port: backendPort, Enabled: true, HealthCheck: domain.DefaultHealthCheck()}},
 		Bindings: []domain.Binding{
-			{ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, Action: domain.BindingActionDrop,
-				Groups: []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "blocked.example"}}}}},
+			{ID: "bAllowed", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast,
+				Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "allowed.example"}}}},
+				Targets: []domain.BindingTarget{{OutboundID: "outA", WeightPercent: 100}}},
+			{ID: "bDefault", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, Action: domain.BindingActionDrop},
 		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("this config should be valid: %v", err)
 	}
 	if err := manager.Apply(cfg); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	t.Cleanup(manager.Stop)
 
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(listenHost, strconv.Itoa(int(listenPort))), 2*time.Second)
+	// The specific rule still forwards normally.
+	allowedConn, err := net.DialTimeout("tcp", net.JoinHostPort(listenHost, strconv.Itoa(int(listenPort))), 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	if _, err := conn.Write(hello); err != nil {
+	defer allowedConn.Close()
+	if _, err := allowedConn.Write(helloAllowed); err != nil {
 		t.Fatal(err)
 	}
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for len(backendReceived()) < len(helloAllowed) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := backendReceived(); !bytes.Equal(got, helloAllowed) {
+		t.Fatalf("backend received %d bytes matching helloAllowed, want %d — the specific rule stopped forwarding", len(got), len(helloAllowed))
+	}
+
+	// Anything else falls through to the default and gets dropped.
+	otherConn, err := net.DialTimeout("tcp", net.JoinHostPort(listenHost, strconv.Itoa(int(listenPort))), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherConn.Close()
+	if _, err := otherConn.Write(helloOther); err != nil {
+		t.Fatal(err)
+	}
+	otherConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 16)
-	n, readErr := conn.Read(buf)
+	n, readErr := otherConn.Read(buf)
 	if readErr == nil {
-		t.Fatalf("expected the connection to be dropped (EOF/reset), got %d bytes: %q", n, buf[:n])
+		t.Fatalf("expected unmatched traffic to be dropped (EOF/reset) by the default, got %d bytes: %q", n, buf[:n])
 	}
 }
 
