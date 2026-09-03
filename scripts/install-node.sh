@@ -10,13 +10,17 @@
 #   sudo ./install-node.sh --docker     # Docker container instead
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.14"
+EZHIKLB_VERSION="1.0.15"
 MODE="systemd"
 [[ "${1:-}" == "--docker" ]] && MODE="docker"
 
 PREFIX="/opt/ezhiklb"
+CONFIG_DIR="/etc/ezhiklb-agent"
 DATA_DIR="/var/lib/ezhiklb-agent"
 ENROLL_DIR="${DATA_DIR}/enroll"
+ENV_FILE="${CONFIG_DIR}/ezhiklb-agent.env"
+VERSION_FILE="${CONFIG_DIR}/agent-version"
+COMPOSE_FILE="${PREFIX}/docker-compose.yml"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
@@ -51,8 +55,11 @@ apt_get_retry() {
 . /etc/os-release
 case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported" ;; esac
 
+EXISTING_INSTALL=0
+[[ -f "$ENV_FILE" ]] && EXISTING_INSTALL=1
+
 control_port="${EZHIKLB_AGENT_PORT:-62050}"
-if [[ -z "${EZHIKLB_AGENT_PORT:-}" ]]; then
+if [[ "$EXISTING_INSTALL" -eq 0 && -z "${EZHIKLB_AGENT_PORT:-}" ]]; then
   tty_read -p "Порт локального API агента [${control_port}]: " answer
   control_port="${answer:-$control_port}"
 fi
@@ -92,22 +99,52 @@ EOF
 modprobe ip_vs ip_vs_rr ip_vs_wrr nf_conntrack xt_ipvs
 sysctl --load /etc/sysctl.d/98-ezhiklb.conf >/dev/null
 
-install -d -m 0750 -o root -g root "$DATA_DIR" "$ENROLL_DIR"
+install -d -m 0750 -o root -g root "$CONFIG_DIR" "$DATA_DIR" "$ENROLL_DIR"
+if [[ ! -f "$ENV_FILE" ]]; then
+  cat >"$ENV_FILE" <<EOF
+EZHIKLB_AGENT_PORT=${control_port}
+EOF
+  chmod 0640 "$ENV_FILE"
+fi
 
 if [[ "$MODE" == "docker" ]]; then
   command -v docker >/dev/null 2>&1 || die "docker is not installed — install Docker first (https://docs.docker.com/engine/install/)"
-  log "Building the node-agent image"
   [[ -f "${BUNDLE_DIR}/docker/node-agent.Dockerfile" ]] || die "missing docker/node-agent.Dockerfile next to this script; use a release bundle"
   [[ -x "${BUNDLE_DIR}/bin/ezhiklb-agent" ]] || die "missing bin/ezhiklb-agent next to this script; build it with 'cd node-agent && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags=\"-s -w\" -o ../bin/ezhiklb-agent ./cmd/ezhiklb-agent' or use a release bundle"
-  docker build -t ezhiklb-node-agent:local -f "${BUNDLE_DIR}/docker/node-agent.Dockerfile" "$BUNDLE_DIR"
-  docker rm -f ezhiklb-node >/dev/null 2>&1 || true
-  log "Starting the node-agent container"
-  docker run -d --name ezhiklb-node --restart unless-stopped \
-    --network host --cap-add NET_ADMIN --cap-add NET_RAW --cap-add NET_BROADCAST \
-    -v /lib/modules:/lib/modules:ro \
-    -v "${DATA_DIR}:/var/lib/ezhiklb-agent" \
-    -e EZHIKLB_AGENT_PORT="${control_port}" \
-    ezhiklb-node-agent:local
+
+  # Persisted under $PREFIX, not read from $BUNDLE_DIR directly: when this
+  # runs via bootstrap-node.sh, $BUNDLE_DIR is a mktemp'd directory that's
+  # gone the moment this script exits — but docker-compose.yml's build
+  # context needs to still exist for every later `ezhik-node restart`/
+  # `edit-env` (docker compose up -d --build), long after that.
+  log "Installing the node agent binary + Dockerfile"
+  install -d -m 0755 -o root -g root "${PREFIX}/bin" "${PREFIX}/docker"
+  install -m 0755 "${BUNDLE_DIR}/bin/ezhiklb-agent" "${PREFIX}/bin/ezhiklb-agent"
+  install -m 0644 "${BUNDLE_DIR}/docker/node-agent.Dockerfile" "${PREFIX}/docker/node-agent.Dockerfile"
+
+  cat >"$COMPOSE_FILE" <<EOF
+services:
+  node-agent:
+    build:
+      context: ${PREFIX}
+      dockerfile: docker/node-agent.Dockerfile
+    image: ezhiklb-node-agent:local
+    container_name: ezhiklb-node
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BROADCAST
+    volumes:
+      - /lib/modules:/lib/modules:ro
+      - ${DATA_DIR}:/var/lib/ezhiklb-agent
+    env_file:
+      - ${ENV_FILE}
+EOF
+
+  log "Building and starting the node-agent container"
+  ( cd "$PREFIX" && docker compose -f "$COMPOSE_FILE" up -d --build )
   log "Waiting for the agent to generate its identity"
   for _ in {1..30}; do [[ -s "${ENROLL_DIR}/connection.txt" ]] && break; sleep 1; done
 else
@@ -125,9 +162,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=${ENV_FILE}
 Environment=EZHIKLB_AGENT_STATE=${DATA_DIR}/state.json
 Environment=EZHIKLB_AGENT_ENROLL_DIR=${ENROLL_DIR}
-Environment=EZHIKLB_AGENT_PORT=${control_port}
 ExecStart=${PREFIX}/bin/ezhiklb-agent
 Restart=on-failure
 RestartSec=3s
@@ -157,7 +194,11 @@ if [[ ! -s "${ENROLL_DIR}/connection.txt" ]]; then
   die "agent did not print its connection block within 30s — check logs (journalctl -u ezhiklb-agent or docker logs ezhiklb-node)"
 fi
 
+install -m 0755 "${BUNDLE_DIR}/scripts/ezhik-node" /usr/local/bin/ezhik-node
+printf '%s\n' "$EZHIKLB_VERSION" >"$VERSION_FILE"
+
 log "${EZHIKLB_VERSION} node agent is running"
 printf '\nВставьте блок ниже целиком в панели: Узлы → Добавить узел.\n\n'
 cat "${ENROLL_DIR}/connection.txt"
 printf '\n(этот блок также лежит в %s)\n' "${ENROLL_DIR}/connection.txt"
+printf '\nУправление нодой: ezhik-node help (stop, restart, logs, edit-env, edit,\nstatus, update, uninstall).\n'

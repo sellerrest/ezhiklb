@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# EzhikLB node-agent management CLI — installed to /usr/local/bin/ezhik-node
+# by scripts/install-node.sh. Works against whichever deployment the agent
+# was actually installed with: systemd (scripts/install-node.sh, the
+# default) or Docker Compose (`--docker`) — `using_docker` below is the only
+# place that distinction matters; every command branches on it once.
+set -Eeuo pipefail
+
+PREFIX="/opt/ezhiklb"
+CONFIG_DIR="/etc/ezhiklb-agent"
+DATA_DIR="/var/lib/ezhiklb-agent"
+ENROLL_DIR="${DATA_DIR}/enroll"
+ENV_FILE="${CONFIG_DIR}/ezhiklb-agent.env"
+VERSION_FILE="${CONFIG_DIR}/agent-version"
+SERVICE="ezhiklb-agent.service"
+COMPOSE_FILE="${PREFIX}/docker-compose.yml"
+# Same repo the panel's ezhik-lb CLI and the frontend's use-version-check.ts
+# check against — release assets are shared across panel and node-agent.
+REPO_SLUG="sellerrest/ezhiklb"
+
+log() { printf '\n\033[1;36mezhik-node\033[0m %s\n' "$*"; }
+die() { printf '\nezhik-node error: %s\n' "$*" >&2; exit 1; }
+need_root() { [[ "${EUID}" -eq 0 ]] || die "run as root (sudo ezhik-node ...)"; }
+confirm() {
+  local reply
+  read -r -p "$1 [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+using_docker() { [[ -f "$COMPOSE_FILE" ]]; }
+
+usage() {
+  cat <<'EOF'
+ezhik-node — управление нодой EzhikLB
+
+Использование: ezhik-node <команда>
+
+  stop              Остановить агент
+  restart           Перезапустить агент
+  logs              Смотреть логи агента (в реальном времени, Ctrl+C для выхода)
+  edit-env          Отредактировать переменные окружения агента
+  edit              Отредактировать файл сервиса (systemd unit или docker-compose.yml)
+  status            Показать состояние агента и блок подключения к панели
+  update            Проверить и установить новую версию агента
+  uninstall         Полностью удалить агент с этой ноды
+
+Примеры:
+  ezhik-node logs
+  ezhik-node status
+  sudo ezhik-node update
+EOF
+}
+
+cmd_stop() {
+  need_root
+  if using_docker; then docker compose -f "$COMPOSE_FILE" stop; else systemctl stop "$SERVICE"; fi
+  log "агент остановлен"
+}
+
+cmd_restart() {
+  need_root
+  if using_docker; then docker compose -f "$COMPOSE_FILE" restart; else systemctl restart "$SERVICE"; fi
+  log "агент перезапущен"
+}
+
+cmd_logs() {
+  if using_docker; then
+    docker compose -f "$COMPOSE_FILE" logs -f --tail=200
+  else
+    journalctl -u "$SERVICE" -f --output=cat
+  fi
+}
+
+cmd_edit_env() {
+  need_root
+  [[ -f "$ENV_FILE" ]] || die "файл не найден: $ENV_FILE"
+  "${EDITOR:-nano}" "$ENV_FILE"
+  if using_docker; then
+    # env_file content isn't picked up by a plain `restart` — the container
+    # needs recreating to re-read it.
+    confirm "Пересоздать контейнер, чтобы применить изменения?" && ( cd "$PREFIX" && docker compose -f "$COMPOSE_FILE" up -d --force-recreate )
+  else
+    confirm "Перезапустить агент, чтобы применить изменения?" && cmd_restart
+  fi
+}
+
+cmd_edit() {
+  need_root
+  if using_docker; then
+    "${EDITOR:-nano}" "$COMPOSE_FILE"
+    confirm "Пересоздать контейнер, чтобы применить изменения?" && ( cd "$PREFIX" && docker compose -f "$COMPOSE_FILE" up -d --build )
+  else
+    local unit="/etc/systemd/system/${SERVICE}"
+    [[ -f "$unit" ]] || die "файл не найден: $unit"
+    "${EDITOR:-nano}" "$unit"
+    systemctl daemon-reload
+    confirm "Перезапустить агент, чтобы применить изменения?" && cmd_restart
+  fi
+}
+
+cmd_status() {
+  if using_docker; then
+    docker compose -f "$COMPOSE_FILE" ps
+  else
+    systemctl status "$SERVICE" --no-pager || true
+  fi
+  if [[ -s "${ENROLL_DIR}/connection.txt" ]]; then
+    printf '\nБлок подключения к панели (Узлы → Добавить узел):\n\n'
+    cat "${ENROLL_DIR}/connection.txt"
+  fi
+}
+
+cmd_update() {
+  need_root
+  command -v curl >/dev/null || die "нужен curl"
+  command -v sha256sum >/dev/null || die "нужен sha256sum"
+  local current latest release_json
+  current="$( [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || echo 0.0.0 )"
+  release_json="$(curl -fsS "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null)" || release_json=""
+  latest="$(printf '%s' "$release_json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p')"
+  [[ -n "$latest" ]] || die "не удалось проверить последнюю версию — есть ли уже опубликованный релиз?"
+  if [[ "$latest" == "$current" ]]; then
+    log "уже установлена последняя версия ($current)"
+    return 0
+  fi
+  log "доступно обновление: $current -> $latest"
+  confirm "Установить $latest сейчас?" || { echo "Отменено."; return 1; }
+
+  # A subshell so `trap ... EXIT` is scoped to just this block, not to
+  # main()'s own eventual return (a RETURN trap here would fire again then,
+  # with tmp long out of scope, crashing with "tmp: unbound variable" under
+  # set -u — a real bug ezhik-lb's own cmd_update had and fixed the same way).
+  (
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    asset="ezhiklb-node-agent_${latest}_linux_amd64.tar.gz"
+    base="https://github.com/${REPO_SLUG}/releases/download/v${latest}"
+    log "скачиваю релиз $latest"
+    curl -fsSL "${base}/${asset}" -o "${tmp}/${asset}" || die "не удалось скачать релиз — проверьте, что релиз v${latest} содержит файл ${asset}"
+    curl -fsSL "${base}/${asset}.sha256" -o "${tmp}/${asset}.sha256" || die "не удалось скачать контрольную сумму"
+    ( cd "$tmp" && sha256sum -c "${asset}.sha256" ) || die "контрольная сумма не совпала — файл повреждён или подменён"
+    tar -xzf "${tmp}/${asset}" -C "$tmp" ezhiklb-agent
+    chmod 0755 "${tmp}/ezhiklb-agent"
+
+    if using_docker; then
+      log "пересобираю образ"
+      install -m 0755 "${tmp}/ezhiklb-agent" "${PREFIX}/bin/ezhiklb-agent"
+      ( cd "$PREFIX" && docker compose -f "$COMPOSE_FILE" up -d --build )
+    else
+      log "устанавливаю новый бинарник"
+      install -m 0755 "${tmp}/ezhiklb-agent" "${PREFIX}/bin/ezhiklb-agent"
+      systemctl restart "$SERVICE"
+    fi
+  )
+  printf '%s\n' "$latest" >"$VERSION_FILE"
+  log "обновлено до $latest"
+}
+
+cmd_uninstall() {
+  need_root
+  echo "Это остановит и полностью удалит агент: сервис/контейнер, бинарник,"
+  echo "данные ноды (${DATA_DIR}) и конфигурацию (${CONFIG_DIR})."
+  echo "На панели эту ноду нужно будет удалить отдельно (Узлы → …→ Удалить)."
+  confirm "Вы уверены?" || { echo "Отменено."; return 1; }
+
+  if using_docker; then
+    docker compose -f "$COMPOSE_FILE" down -v || true
+    docker rmi ezhiklb-node-agent:local >/dev/null 2>&1 || true
+  else
+    systemctl stop "$SERVICE" 2>/dev/null || true
+    systemctl disable "$SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${SERVICE}"
+    systemctl daemon-reload
+  fi
+  rm -rf "$PREFIX" "$CONFIG_DIR" "$DATA_DIR"
+  rm -f /usr/local/bin/ezhik-node
+  log "агент полностью удалён с этой ноды."
+}
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    logs) cmd_logs ;;
+    edit-env) cmd_edit_env ;;
+    edit) cmd_edit ;;
+    status) cmd_status ;;
+    update) cmd_update ;;
+    uninstall) cmd_uninstall ;;
+    ""|help|-h|--help) usage ;;
+    *) die "неизвестная команда: ${cmd} (см. ezhik-node help)" ;;
+  esac
+}
+
+main "$@"

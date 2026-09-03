@@ -42,10 +42,13 @@ mkdir -p "${tmp}/bundle/bin" "${tmp}/bundle/scripts" "${tmp}/bundle/docker"
 tar -xzf "${tmp}/${asset}" -C "${tmp}/bundle/bin" ezhiklb-agent
 chmod 0755 "${tmp}/bundle/bin/ezhiklb-agent"
 
-log "fetching install-node.sh (tag v${latest})"
+log "fetching install-node.sh + ezhik-node (tag v${latest})"
 curl -fsSL "https://raw.githubusercontent.com/${REPO_SLUG}/v${latest}/scripts/install-node.sh" -o "${tmp}/bundle/scripts/install-node.sh" \
   || die "could not fetch scripts/install-node.sh for tag v${latest}"
 chmod 0755 "${tmp}/bundle/scripts/install-node.sh"
+curl -fsSL "https://raw.githubusercontent.com/${REPO_SLUG}/v${latest}/scripts/ezhik-node" -o "${tmp}/bundle/scripts/ezhik-node" \
+  || die "could not fetch scripts/ezhik-node for tag v${latest}"
+chmod 0755 "${tmp}/bundle/scripts/ezhik-node"
 if [[ "$MODE" == "docker" ]]; then
   curl -fsSL "https://raw.githubusercontent.com/${REPO_SLUG}/v${latest}/docker/node-agent.Dockerfile" -o "${tmp}/bundle/docker/node-agent.Dockerfile" \
     || die "could not fetch docker/node-agent.Dockerfile for tag v${latest}"
