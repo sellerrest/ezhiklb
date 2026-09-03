@@ -54,25 +54,27 @@ def default_health_check() -> HealthCheck:
     return HealthCheck()
 
 
-class InboundMode(str, Enum):
-    TCP = "tcp"
-    HTTP = "http"
-
-
 class Inbound(BaseModel):
     """A listening socket on the node: host+port to accept connections on,
-    which L4 protocols to actually listen with (tcp/udp, independently
-    toggleable), and whether traffic on it should be routed by raw TCP
-    passthrough (SNI-only matching) or as HTTP (SNI + URI path matching)."""
+    and which L4 protocols to actually listen with (tcp/udp, independently
+    toggleable). Whether TCP traffic on it is routed by raw passthrough
+    (SNI-only matching) or as HTTP (SNI + URI path matching) is no longer
+    decided here — it's a per-Binding choice (see BindingMode), since the
+    same socket only ever runs one or the other and a Binding is where an
+    operator actually reasons about routing."""
 
     id: str = ""
     name: str = ""
     enabled: bool = True
     listen_address: str = "0.0.0.0"
     listen_port: int = 0
-    mode: InboundMode = InboundMode.TCP
     tcp: bool = True
     udp: bool = False
+
+
+class BindingMode(str, Enum):
+    TCP = "tcp"
+    HTTP = "http"
 
 
 class Outbound(BaseModel):
@@ -122,22 +124,37 @@ class SelectionStrategy(str, Enum):
     MANUAL = "manual"
 
 
+class BindingAction(str, Enum):
+    FORWARD = "forward"
+    DROP = "drop"
+
+
 class BindingTarget(BaseModel):
     outbound_id: str = ""
     weight_percent: int = 100
 
 
 class Binding(BaseModel):
-    """Connects one inbound to one or more outbounds. An empty ``groups``
-    list means "match everything" (a plain passthrough/balance rule); a
-    non-empty list only routes traffic whose SNI/path matches at least one
-    group. ``targets`` lists which outbounds receive matching traffic and,
-    for manual selection, what share of it."""
+    """Connects one inbound to one or more outbounds. ``mode`` decides
+    whether this binding's rules can match SNI only (tcp, raw passthrough)
+    or SNI *and* URI path (http, terminated) — every binding sharing the
+    same inbound_id must agree on this, since one listening socket only
+    ever runs one of the two engines (see validate_core_config).
+
+    An empty ``groups`` list means "match everything" — at most one binding
+    per inbound may be this shape, since a non-default rule placed after it
+    could never be reached; it acts as that inbound's *default*, always
+    evaluated last regardless of list position. ``action`` decides what
+    happens to matching traffic: FORWARD (the default) sends it to
+    ``targets``, sharing it per ``selection_strategy``; DROP resets the
+    connection immediately and ``targets`` must be empty."""
 
     id: str = ""
     name: str = ""
     enabled: bool = True
     inbound_id: str = ""
+    mode: BindingMode = BindingMode.TCP
+    action: BindingAction = BindingAction.FORWARD
     affinity_seconds: int = 0
     selection_strategy: SelectionStrategy = SelectionStrategy.LEAST
     groups: list[MatchGroup] = Field(default_factory=list)
@@ -247,6 +264,8 @@ def validate_core_config(config: CoreConfig) -> None:
         _validate_health_check(outbound.health_check, f"{prefix}.health_check", problems)
 
     binding_ids: set[str] = set()
+    mode_by_inbound: dict[str, tuple[int, BindingMode]] = {}
+    default_binding_by_inbound: dict[str, int] = {}
     for i, binding in enumerate(config.bindings):
         prefix = f"bindings[{i}]"
         binding_id = binding.id.strip()
@@ -262,6 +281,29 @@ def validate_core_config(config: CoreConfig) -> None:
         if not (0 <= binding.affinity_seconds <= 86400):
             problems.append(f"{prefix}.affinity_seconds must be between 0 and 86400")
 
+        if binding.inbound_id:
+            # One listening socket only ever runs one engine (raw TCP
+            # passthrough or terminated HTTP) — every binding attached to it
+            # must agree on which, since mode now lives on the binding, not
+            # the inbound it points at.
+            first = mode_by_inbound.get(binding.inbound_id)
+            if first is None:
+                mode_by_inbound[binding.inbound_id] = (i, binding.mode)
+            elif first[1] != binding.mode:
+                problems.append(f"{prefix}.mode conflicts with bindings[{first[0]}].mode — all bindings for inbound {binding.inbound_id} must share one mode")
+
+        if not binding.groups:
+            # An empty group list matches everything — this binding is
+            # inbound_id's *default*, always evaluated last regardless of
+            # where it sits in the list. Only one makes sense per inbound:
+            # a second one could never be reached.
+            if binding.inbound_id:
+                first_default = default_binding_by_inbound.get(binding.inbound_id)
+                if first_default is None:
+                    default_binding_by_inbound[binding.inbound_id] = i
+                else:
+                    problems.append(f"{prefix} is a second default (empty-rule) binding for inbound {binding.inbound_id} — bindings[{first_default}] is already its default")
+
         for g, group in enumerate(binding.groups):
             if not group.conditions:
                 problems.append(f"{prefix}.groups[{g}] must have at least one condition")
@@ -269,11 +311,15 @@ def validate_core_config(config: CoreConfig) -> None:
                 cond_prefix = f"{prefix}.groups[{g}].conditions[{c}]"
                 if not condition.value.strip():
                     problems.append(f"{cond_prefix}.value is required")
-                if condition.field == MatchField.PATH and inbound is not None and inbound.mode != InboundMode.HTTP:
-                    problems.append(f"{cond_prefix} matches path but inbound {binding.inbound_id} is not in http mode")
+                if condition.field == MatchField.PATH and binding.mode != BindingMode.HTTP:
+                    problems.append(f"{cond_prefix} matches path but binding {prefix} is not in http mode")
 
-        if not binding.targets:
-            problems.append(f"{prefix}.targets must have at least one outbound")
+        if binding.action == BindingAction.DROP:
+            if binding.targets:
+                problems.append(f"{prefix}.targets must be empty when action is drop")
+        else:
+            if not binding.targets:
+                problems.append(f"{prefix}.targets must have at least one outbound")
         target_ids: set[str] = set()
         weight_total = 0
         for t, target in enumerate(binding.targets):

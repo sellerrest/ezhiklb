@@ -10,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"ezhiklb-node-agent/internal/domain"
 )
 
 // sniffTimeout bounds how long a TCP router waits for a ClientHello to
@@ -30,6 +32,16 @@ func enableKeepAlive(conn net.Conn) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetKeepAlive(true)
 		_ = tc.SetKeepAlivePeriod(tcpKeepAlivePeriod)
+	}
+}
+
+// resetConnection makes the caller's already-deferred conn.Close() send an
+// immediate RST instead of a graceful FIN — what a domain.BindingActionDrop
+// binding means by "drop": refuse the connection outright, not just decline
+// to relay it.
+func resetConnection(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
 	}
 }
 
@@ -113,6 +125,11 @@ func (t *tcpRouter) handle(ctx context.Context, conn net.Conn) {
 	binding, ok := t.selectBinding(sni)
 	if !ok {
 		t.logger.Debug("tcp proxy: no matching binding", "sni", sni, "remote", conn.RemoteAddr().String())
+		return
+	}
+	if binding.action == domain.BindingActionDrop {
+		t.logger.Debug("tcp proxy: binding action is drop", "sni", sni, "remote", conn.RemoteAddr().String())
+		resetConnection(conn)
 		return
 	}
 	target, ok := pickTarget(binding.strategy, binding.targets, t.health, t.conns)

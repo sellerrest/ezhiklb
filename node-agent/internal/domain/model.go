@@ -36,30 +36,36 @@ func DefaultHealthCheck() HealthCheck {
 	}
 }
 
-type InboundMode string
-
-const (
-	InboundModeTCP  InboundMode = "tcp"
-	InboundModeHTTP InboundMode = "http"
-)
-
 // Inbound is a listening socket on the node. Unlike the old Listener, it no
 // longer owns a static backend pool directly — which outbounds receive its
 // traffic, and under what SNI/path rules, is decided by the Bindings that
 // reference it. TCP and UDP are independently toggleable: TCP traffic is
 // routed by the internal/proxy package (SNI/HTTP-aware); UDP has no such
 // signal to route by, so it is still forwarded via IPVS as one flat pool
-// (see reconciler.go's compileServices).
+// (see reconciler.go's compileServices) — unless a Binding on this inbound
+// carries real match rules, in which case UDP is not forwarded at all (UDP
+// carries no SNI/Host to evaluate those rules against).
+//
+// Whether TCP traffic here is routed by raw passthrough (SNI-only) or as
+// HTTP (SNI + URI path) is not decided here — see BindingMode: the same
+// socket only ever runs one of the two engines, and a Binding is where an
+// operator actually reasons about routing.
 type Inbound struct {
-	ID            string      `json:"id"`
-	Name          string      `json:"name"`
-	Enabled       bool        `json:"enabled"`
-	ListenAddress string      `json:"listen_address"`
-	ListenPort    uint16      `json:"listen_port"`
-	Mode          InboundMode `json:"mode"`
-	TCP           bool        `json:"tcp"`
-	UDP           bool        `json:"udp"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Enabled       bool   `json:"enabled"`
+	ListenAddress string `json:"listen_address"`
+	ListenPort    uint16 `json:"listen_port"`
+	TCP           bool   `json:"tcp"`
+	UDP           bool   `json:"udp"`
 }
+
+type BindingMode string
+
+const (
+	BindingModeTCP  BindingMode = "tcp"
+	BindingModeHTTP BindingMode = "http"
+)
 
 // Outbound is a backend server, monitored independently (each outbound
 // carries its own HealthCheck now, not one shared per core).
@@ -110,19 +116,38 @@ const (
 	SelectionManual SelectionStrategy = "manual"
 )
 
+type BindingAction string
+
+const (
+	BindingActionForward BindingAction = "forward"
+	BindingActionDrop    BindingAction = "drop"
+)
+
 type BindingTarget struct {
 	OutboundID    string `json:"outbound_id"`
 	WeightPercent int    `json:"weight_percent"`
 }
 
-// Binding connects one Inbound to one or more Outbounds. An empty Groups
-// list matches everything (a plain passthrough/balance rule); a non-empty
-// list only routes traffic whose SNI/path matches at least one group.
+// Binding connects one Inbound to one or more Outbounds. Mode decides
+// whether this binding's rules can match SNI only (tcp, raw passthrough) or
+// SNI *and* URI path (http, terminated) — every binding sharing the same
+// InboundID must agree on this (see Validate), since one listening socket
+// only ever runs one of the two engines.
+//
+// An empty Groups list matches everything — at most one binding per inbound
+// may be this shape, since a non-default rule placed after it could never
+// be reached; it acts as that inbound's *default*, always evaluated last
+// regardless of list position (see proxy.Manager.Apply). Action decides
+// what happens to matching traffic: forward (the default) sends it to
+// Targets, sharing it per SelectionStrategy; drop resets the connection
+// immediately and Targets must be empty.
 type Binding struct {
 	ID                string            `json:"id"`
 	Name              string            `json:"name"`
 	Enabled           bool              `json:"enabled"`
 	InboundID         string            `json:"inbound_id"`
+	Mode              BindingMode       `json:"mode"`
+	Action            BindingAction     `json:"action"`
 	AffinitySecs      int               `json:"affinity_seconds"`
 	SelectionStrategy SelectionStrategy `json:"selection_strategy"`
 	Groups            []MatchGroup      `json:"groups"`
@@ -361,6 +386,12 @@ func (c ProfileConfig) Validate() error {
 	}
 
 	bindingIDs := map[string]bool{}
+	type modeOwner struct {
+		index int
+		mode  BindingMode
+	}
+	modeByInbound := map[string]modeOwner{}
+	defaultBindingByInbound := map[string]int{}
 	for i, binding := range c.Bindings {
 		prefix := fmt.Sprintf("bindings[%d]", i)
 		if strings.TrimSpace(binding.ID) == "" {
@@ -370,12 +401,38 @@ func (c ProfileConfig) Validate() error {
 		}
 		bindingIDs[binding.ID] = true
 
-		inbound, inboundExists := inboundByID[binding.InboundID]
+		_, inboundExists := inboundByID[binding.InboundID]
 		if !inboundExists {
 			problems = append(problems, prefix+".inbound_id must reference an existing inbound")
 		}
 		if binding.AffinitySecs < 0 || binding.AffinitySecs > 86400 {
 			problems = append(problems, prefix+".affinity_seconds must be between 0 and 86400")
+		}
+
+		if binding.InboundID != "" {
+			// One listening socket only ever runs one engine (raw TCP
+			// passthrough or terminated HTTP) — every binding attached to
+			// it must agree on which, since mode now lives on the binding,
+			// not the inbound it points at.
+			if first, ok := modeByInbound[binding.InboundID]; !ok {
+				modeByInbound[binding.InboundID] = modeOwner{index: i, mode: binding.Mode}
+			} else if first.mode != binding.Mode {
+				problems = append(problems, fmt.Sprintf("%s.mode conflicts with bindings[%d].mode — all bindings for inbound %s must share one mode", prefix, first.index, binding.InboundID))
+			}
+		}
+
+		if len(binding.Groups) == 0 {
+			// An empty group list matches everything — this binding is
+			// InboundID's *default*, always evaluated last regardless of
+			// where it sits in the list. Only one makes sense per inbound:
+			// a second one could never be reached.
+			if binding.InboundID != "" {
+				if first, ok := defaultBindingByInbound[binding.InboundID]; !ok {
+					defaultBindingByInbound[binding.InboundID] = i
+				} else {
+					problems = append(problems, fmt.Sprintf("%s is a second default (empty-rule) binding for inbound %s — bindings[%d] is already its default", prefix, binding.InboundID, first))
+				}
+			}
 		}
 
 		for g, group := range binding.Groups {
@@ -387,13 +444,17 @@ func (c ProfileConfig) Validate() error {
 				if strings.TrimSpace(condition.Value) == "" {
 					problems = append(problems, condPrefix+".value is required")
 				}
-				if condition.Field == MatchFieldPath && inboundExists && inbound.Mode != InboundModeHTTP {
-					problems = append(problems, fmt.Sprintf("%s matches path but inbound %s is not in http mode", condPrefix, binding.InboundID))
+				if condition.Field == MatchFieldPath && binding.Mode != BindingModeHTTP {
+					problems = append(problems, fmt.Sprintf("%s matches path but binding %s is not in http mode", condPrefix, prefix))
 				}
 			}
 		}
 
-		if len(binding.Targets) == 0 {
+		if binding.Action == BindingActionDrop {
+			if len(binding.Targets) > 0 {
+				problems = append(problems, prefix+".targets must be empty when action is drop")
+			}
+		} else if len(binding.Targets) == 0 {
 			problems = append(problems, prefix+".targets must have at least one outbound")
 		}
 		targetIDs := map[string]bool{}

@@ -4,10 +4,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
-import type { Inbound, InboundMode } from "@/types"
+import type { Inbound } from "@/types"
 
 const isIPv4OrWildcard = (value: string) => {
   if (value === "0.0.0.0") return true
@@ -39,7 +38,7 @@ export function InboundDialog({ initial, others, onSave, onClose }: { initial: I
       <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{initial.name ? `Редактирование · ${initial.name}` : "Новое входящее"}</DialogTitle>
-          <DialogDescription>Какой хост и порт слушать, и в каком режиме разбирать трафик.</DialogDescription>
+          <DialogDescription>Какой хост и порт слушать. Режим разбора трафика (TCP/HTTP) и правила маршрутизации задаются в связующих.</DialogDescription>
         </DialogHeader>
 
         <div className="flex items-center justify-between rounded-lg border p-3">
@@ -64,20 +63,6 @@ export function InboundDialog({ initial, others, onSave, onClose }: { initial: I
             <Input type="number" min={1} max={65535} value={inbound.listen_port} onChange={(e) => patch({ listen_port: Number(e.target.value) })} />
             {errors.listen_port && <span className="text-destructive text-xs">{errors.listen_port}</span>}
           </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <Label>Режим</Label>
-          <Select value={inbound.mode} onValueChange={(v) => patch({ mode: v as InboundMode })}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="tcp">TCP (по SNI)</SelectItem>
-              <SelectItem value="http">HTTP (по SNI и пути)</SelectItem>
-            </SelectContent>
-          </Select>
-          <span className="text-muted-foreground text-xs">В связующих для этого входящего будут доступны условия {inbound.mode === "http" ? "по SNI и по URI-пути" : "по SNI"}.</span>
         </div>
 
         <div className="flex flex-col gap-1.5">

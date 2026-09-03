@@ -6,11 +6,12 @@ import pytest
 
 from ezhiklb_panel.domain import (
     Binding,
+    BindingAction,
+    BindingMode,
     BindingTarget,
     CoreConfig,
     CoreValidationError,
     Inbound,
-    InboundMode,
     MatchCondition,
     MatchField,
     MatchGroup,
@@ -28,9 +29,9 @@ def test_default_core_is_valid():
 
 def test_simple_tcp_passthrough_is_valid():
     config = default_core_config()
-    config.inbounds = [Inbound(id="in1", name="Web", listen_address="0.0.0.0", listen_port=8002, mode=InboundMode.TCP, tcp=True, udp=False)]
+    config.inbounds = [Inbound(id="in1", name="Web", listen_address="0.0.0.0", listen_port=8002, tcp=True, udp=False)]
     config.outbounds = [Outbound(id="out1", name="Server 1", address="192.0.2.10", port=8080)]
-    config.bindings = [Binding(id="b1", name="Web binding", inbound_id="in1", targets=[BindingTarget(outbound_id="out1")])]
+    config.bindings = [Binding(id="b1", name="Web binding", inbound_id="in1", mode=BindingMode.TCP, targets=[BindingTarget(outbound_id="out1")])]
     validate_core_config(config)
 
 
@@ -68,20 +69,37 @@ def test_binding_referencing_unknown_outbound_is_rejected():
         validate_core_config(config)
 
 
-def test_path_match_on_tcp_inbound_is_rejected():
+def test_path_match_on_tcp_mode_binding_is_rejected():
     config = default_core_config()
-    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, mode=InboundMode.TCP, tcp=True)]
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
     config.outbounds = [Outbound(id="out1", name="Server 1", address="192.0.2.10", port=8080)]
     config.bindings = [
         Binding(
             id="b1",
             inbound_id="in1",
+            mode=BindingMode.TCP,
             groups=[MatchGroup(conditions=[MatchCondition(field=MatchField.PATH, value="/api")])],
             targets=[BindingTarget(outbound_id="out1")],
         )
     ]
     with pytest.raises(CoreValidationError):
         validate_core_config(config)
+
+
+def test_path_match_on_http_mode_binding_is_valid():
+    config = default_core_config()
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
+    config.outbounds = [Outbound(id="out1", name="Server 1", address="192.0.2.10", port=8080)]
+    config.bindings = [
+        Binding(
+            id="b1",
+            inbound_id="in1",
+            mode=BindingMode.HTTP,
+            groups=[MatchGroup(conditions=[MatchCondition(field=MatchField.PATH, value="/api")])],
+            targets=[BindingTarget(outbound_id="out1")],
+        )
+    ]
+    validate_core_config(config)
 
 
 def test_manual_weights_must_sum_to_100():
@@ -101,6 +119,46 @@ def test_manual_weights_must_sum_to_100():
     ]
     with pytest.raises(CoreValidationError):
         validate_core_config(config)
+
+
+def test_bindings_on_the_same_inbound_must_share_one_mode():
+    config = default_core_config()
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
+    config.outbounds = [Outbound(id="out1", name="Server 1", address="192.0.2.10", port=8080)]
+    config.bindings = [
+        Binding(id="b1", inbound_id="in1", mode=BindingMode.TCP, targets=[BindingTarget(outbound_id="out1")]),
+        Binding(id="b2", inbound_id="in1", mode=BindingMode.HTTP, targets=[BindingTarget(outbound_id="out1")]),
+    ]
+    with pytest.raises(CoreValidationError):
+        validate_core_config(config)
+
+
+def test_second_default_binding_on_the_same_inbound_is_rejected():
+    config = default_core_config()
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
+    config.outbounds = [Outbound(id="out1", name="Server 1", address="192.0.2.10", port=8080)]
+    config.bindings = [
+        Binding(id="b1", inbound_id="in1", groups=[], targets=[BindingTarget(outbound_id="out1")]),
+        Binding(id="b2", inbound_id="in1", groups=[], targets=[BindingTarget(outbound_id="out1")]),
+    ]
+    with pytest.raises(CoreValidationError):
+        validate_core_config(config)
+
+
+def test_drop_action_forbids_targets():
+    config = default_core_config()
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
+    config.outbounds = [Outbound(id="out1", name="Server 1", address="192.0.2.10", port=8080)]
+    config.bindings = [Binding(id="b1", inbound_id="in1", action=BindingAction.DROP, targets=[BindingTarget(outbound_id="out1")])]
+    with pytest.raises(CoreValidationError):
+        validate_core_config(config)
+
+
+def test_drop_action_with_no_targets_is_valid():
+    config = default_core_config()
+    config.inbounds = [Inbound(id="in1", name="Web", listen_port=8002, tcp=True)]
+    config.bindings = [Binding(id="b1", inbound_id="in1", action=BindingAction.DROP, targets=[])]
+    validate_core_config(config)
 
 
 @pytest.mark.parametrize(

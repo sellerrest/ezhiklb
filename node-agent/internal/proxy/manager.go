@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
@@ -21,7 +22,7 @@ type running struct {
 	router runningRouter
 	cancel context.CancelFunc
 	addr   string
-	mode   domain.InboundMode
+	mode   domain.BindingMode
 }
 
 // Manager owns every TCP/HTTP listener the proxy currently runs, one per
@@ -72,6 +73,7 @@ func (m *Manager) Apply(cfg domain.ProfileConfig) error {
 	}
 
 	bindingsByInbound := map[string][]compiledBinding{}
+	modeByInbound := map[string]domain.BindingMode{}
 	for _, binding := range cfg.Bindings {
 		targets := make([]ResolvedTarget, 0, len(binding.Targets))
 		for _, target := range binding.Targets {
@@ -81,12 +83,26 @@ func (m *Manager) Apply(cfg domain.ProfileConfig) error {
 			}
 			targets = append(targets, ResolvedTarget{OutboundID: outbound.ID, Address: outbound.Address, Port: outbound.Port, WeightPercent: target.WeightPercent})
 		}
-		if len(targets) == 0 {
+		// A drop binding legitimately has no targets — that's not a reason
+		// to skip it the way an under-resolved forward binding would be.
+		if binding.Action != domain.BindingActionDrop && len(targets) == 0 {
 			continue
 		}
+		if _, ok := modeByInbound[binding.InboundID]; !ok {
+			modeByInbound[binding.InboundID] = binding.Mode
+		}
 		bindingsByInbound[binding.InboundID] = append(bindingsByInbound[binding.InboundID], compiledBinding{
-			enabled: binding.Enabled, groups: binding.Groups, strategy: binding.SelectionStrategy, targets: targets,
+			enabled: binding.Enabled, groups: binding.Groups, strategy: binding.SelectionStrategy, targets: targets, action: binding.Action,
 		})
+	}
+	// Guarantee the (at most one) default — empty-groups — binding for each
+	// inbound is always evaluated last, regardless of where it happened to
+	// sit in cfg.Bindings: domain.ProfileConfig.Validate enforces there's
+	// only one, but nothing stops it from being saved first in the list,
+	// which would silently make every rule after it unreachable.
+	for id, bindings := range bindingsByInbound {
+		sort.SliceStable(bindings, func(i, j int) bool { return len(bindings[i].groups) > 0 && len(bindings[j].groups) == 0 })
+		bindingsByInbound[id] = bindings
 	}
 
 	desired := map[string]domain.Inbound{}
@@ -96,9 +112,21 @@ func (m *Manager) Apply(cfg domain.ProfileConfig) error {
 		}
 	}
 
+	// Mode is no longer stored on Inbound — it's derived from whatever its
+	// Bindings declare (domain.ProfileConfig.Validate guarantees they all
+	// agree). An inbound with no bindings yet has nothing to derive a mode
+	// from; TCP passthrough is the sensible default until a Binding for it
+	// actually exists.
+	modeOf := func(id string) domain.BindingMode {
+		if mode, ok := modeByInbound[id]; ok {
+			return mode
+		}
+		return domain.BindingModeTCP
+	}
+
 	for id, current := range m.routers {
 		inbound, stillWanted := desired[id]
-		if !stillWanted || inbound.Mode != current.mode || addrOf(inbound) != current.addr {
+		if !stillWanted || modeOf(id) != current.mode || addrOf(inbound) != current.addr {
 			current.cancel()
 			_ = current.router.close()
 			delete(m.routers, id)
@@ -108,13 +136,14 @@ func (m *Manager) Apply(cfg domain.ProfileConfig) error {
 	var errs []string
 	for id, inbound := range desired {
 		bindings := bindingsByInbound[id]
+		mode := modeOf(id)
 		addr := addrOf(inbound)
 		current, exists := m.routers[id]
 		if !exists {
 			routerCtx, cancel := context.WithCancel(m.ctx)
 			var router runningRouter
 			var startErr error
-			if inbound.Mode == domain.InboundModeHTTP {
+			if mode == domain.BindingModeHTTP {
 				httpR := newHTTPRouter(m.logger, m.health)
 				startErr = httpR.start(routerCtx, addr)
 				router = httpR
@@ -128,9 +157,9 @@ func (m *Manager) Apply(cfg domain.ProfileConfig) error {
 				errs = append(errs, fmt.Sprintf("inbound %s: %v", inbound.Name, startErr))
 				continue
 			}
-			current = &running{router: router, cancel: cancel, addr: addr, mode: inbound.Mode}
+			current = &running{router: router, cancel: cancel, addr: addr, mode: mode}
 			m.routers[id] = current
-			m.logger.Info("l7 proxy listener started", "inbound", inbound.Name, "address", addr, "mode", inbound.Mode)
+			m.logger.Info("l7 proxy listener started", "inbound", inbound.Name, "address", addr, "mode", mode)
 		}
 		current.router.updateBindings(bindings)
 	}

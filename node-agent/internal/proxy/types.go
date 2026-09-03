@@ -40,12 +40,16 @@ type OutboundStat struct {
 // compiledBinding is a Binding with its InboundID already used for grouping
 // (by the Manager) and its targets pre-resolved against the config's
 // Outbound list, so the hot path never has to re-walk the whole config per
-// connection.
+// connection. An empty groups list matches everything — the Manager sorts
+// each inbound's bindings so this one (there's at most one, per
+// domain.ProfileConfig.Validate) always evaluates last, regardless of its
+// original position, acting as that inbound's default.
 type compiledBinding struct {
 	enabled  bool
 	groups   []domain.MatchGroup
 	strategy domain.SelectionStrategy
 	targets  []ResolvedTarget
+	action   domain.BindingAction
 }
 
 // HealthSource lets the proxy skip outbounds the health monitor has already

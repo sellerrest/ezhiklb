@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ezhiklb-node-agent/internal/domain"
 )
 
 // countingReadCloser/countingResponseWriter report request-body and
@@ -127,6 +129,10 @@ func (h *httpRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no route matches this request", http.StatusBadGateway)
 		return
 	}
+	if binding.action == domain.BindingActionDrop {
+		dropConnection(w)
+		return
+	}
 	target, ok := pickTarget(binding.strategy, binding.targets, h.health, h.conns)
 	if !ok {
 		http.Error(w, "no reachable upstream", http.StatusBadGateway)
@@ -155,6 +161,28 @@ func (h *httpRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ErrorLog: nil,
 	}
 	proxy.ServeHTTP(countingW, r)
+}
+
+// dropConnection is what a domain.BindingActionDrop binding means over
+// HTTP: refuse the request outright rather than answering with any HTTP
+// response — hijacks the raw connection and resets it (RST, not a graceful
+// FIN) the same way tcp_router.go's resetConnection does. Falls back to a
+// plain error response on the rare ResponseWriter that can't be hijacked.
+func dropConnection(w http.ResponseWriter) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "connection refused", http.StatusForbidden)
+		return
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, "connection refused", http.StatusForbidden)
+		return
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = conn.Close()
 }
 
 func (h *httpRouter) selectBinding(host, path string) (compiledBinding, bool) {

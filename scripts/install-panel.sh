@@ -5,7 +5,7 @@
 # see docs/ARCHITECTURE.md for the expected bundle layout.
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.8"
+EZHIKLB_VERSION="1.0.9"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"

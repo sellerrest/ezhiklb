@@ -57,6 +57,27 @@ func TestCompileServicesIsUDPOnly(t *testing.T) {
 	}
 }
 
+// UDP carries no SNI/Host to test a match rule against — a binding with
+// real conditions (not just an empty-groups default) can never coherently
+// apply to it. Rather than silently forwarding everything anyway (ignoring
+// a rule the operator explicitly configured), UDP must stop being forwarded
+// for that inbound at all.
+func TestCompileServicesSkipsUDPWhenARealRuleExists(t *testing.T) {
+	config := domain.DefaultProfileConfig()
+	config.Inbounds = []domain.Inbound{{ID: "in1", Name: "Dual", Enabled: true, ListenPort: 8002, TCP: true, UDP: true}}
+	config.Outbounds = []domain.Outbound{{ID: "out1", Name: "Backend", Address: "192.0.2.10", Port: 9000, Enabled: true, HealthCheck: domain.DefaultHealthCheck()}}
+	config.Bindings = []domain.Binding{{
+		ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast,
+		Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "example.com"}}}},
+		Targets: []domain.BindingTarget{{OutboundID: "out1", WeightPercent: 100}},
+	}}
+
+	services := compileServices(config, "198.51.100.10")
+	if len(services) != 0 {
+		t.Fatalf("services = %d, want 0 (UDP must not forward once a real match rule exists on this inbound)", len(services))
+	}
+}
+
 func TestCompileServicesSkipsTCPOnlyInbound(t *testing.T) {
 	config := domain.DefaultProfileConfig()
 	config.Inbounds = []domain.Inbound{{ID: "in1", Name: "TCP only", Enabled: true, ListenPort: 8002, TCP: true, UDP: false}}
@@ -163,9 +184,9 @@ func TestReconcileAppliesL7ProxyForTCPInbounds(t *testing.T) {
 		Revision:       1,
 		Config: domain.ProfileConfig{
 			SchemaVersion: domain.SchemaVersion,
-			Inbounds:      []domain.Inbound{{ID: "in1", Name: "Web", Enabled: true, ListenAddress: "127.0.0.1", ListenPort: freePort, Mode: domain.InboundModeTCP, TCP: true}},
+			Inbounds:      []domain.Inbound{{ID: "in1", Name: "Web", Enabled: true, ListenAddress: "127.0.0.1", ListenPort: freePort, TCP: true}},
 			Outbounds:     []domain.Outbound{{ID: "out1", Name: "Backend", Address: "192.0.2.10", Port: 9000, Enabled: true, HealthCheck: domain.DefaultHealthCheck()}},
-			Bindings:      []domain.Binding{{ID: "b1", Enabled: true, InboundID: "in1", SelectionStrategy: domain.SelectionLeast, Targets: []domain.BindingTarget{{OutboundID: "out1", WeightPercent: 100}}}},
+			Bindings:      []domain.Binding{{ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast, Targets: []domain.BindingTarget{{OutboundID: "out1", WeightPercent: 100}}}},
 		},
 	}
 	if err := r.Reconcile(context.Background(), desired); err != nil {

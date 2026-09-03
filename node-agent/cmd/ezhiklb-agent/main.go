@@ -25,7 +25,7 @@ import (
 	"ezhiklb-node-agent/internal/agent"
 )
 
-const version = "1.0.8"
+const version = "1.0.9"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

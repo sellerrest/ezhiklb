@@ -8,15 +8,12 @@ export interface HealthCheck {
   recovery_threshold: number
 }
 
-export type InboundMode = "tcp" | "http"
-
 export interface Inbound {
   id: string
   name: string
   enabled: boolean
   listen_address: string
   listen_port: number
-  mode: InboundMode
   tcp: boolean
   udp: boolean
 }
@@ -45,6 +42,9 @@ export interface MatchGroup {
 
 export type SelectionStrategy = "ping" | "least" | "manual"
 
+export type BindingMode = "tcp" | "http"
+export type BindingAction = "forward" | "drop"
+
 export interface BindingTarget {
   outbound_id: string
   weight_percent: number
@@ -55,8 +55,18 @@ export interface Binding {
   name: string
   enabled: boolean
   inbound_id: string
+  // Whether this binding's rules can match SNI only (tcp, raw passthrough)
+  // or SNI *and* URI path (http, terminated) — every binding sharing the
+  // same inbound_id must agree, since one listening socket only ever runs
+  // one of the two engines.
+  mode: BindingMode
+  // "forward" (default) sends matching traffic to targets; "drop" resets
+  // the connection immediately and targets must be empty.
+  action: BindingAction
   affinity_seconds: number
   selection_strategy: SelectionStrategy
+  // An empty groups list matches everything — at most one binding per
+  // inbound_id may be this shape (its default, always evaluated last).
   groups: MatchGroup[]
   targets: BindingTarget[]
 }

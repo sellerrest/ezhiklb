@@ -69,16 +69,16 @@ func TestManagerRoutesTCPBySNI(t *testing.T) {
 
 	cfg := domain.ProfileConfig{
 		SchemaVersion: domain.SchemaVersion,
-		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, Mode: domain.InboundModeTCP, TCP: true}},
+		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, TCP: true}},
 		Outbounds: []domain.Outbound{
 			{ID: "outA", Name: "A", Address: backendAAddr, Port: backendAPort, Enabled: true},
 			{ID: "outB", Name: "B", Address: backendBAddr, Port: backendBPort, Enabled: true},
 		},
 		Bindings: []domain.Binding{
-			{ID: "b1", Enabled: true, InboundID: "in1", SelectionStrategy: domain.SelectionLeast,
+			{ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast,
 				Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "a.example"}}}},
 				Targets: []domain.BindingTarget{{OutboundID: "outA", WeightPercent: 100}}},
-			{ID: "b2", Enabled: true, InboundID: "in1", SelectionStrategy: domain.SelectionLeast,
+			{ID: "b2", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast,
 				Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "b.example"}}}},
 				Targets: []domain.BindingTarget{{OutboundID: "outB", WeightPercent: 100}}},
 		},
@@ -152,10 +152,10 @@ func TestManagerStatsTracksLiveConnectionsAndIPs(t *testing.T) {
 
 	cfg := domain.ProfileConfig{
 		SchemaVersion: domain.SchemaVersion,
-		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, Mode: domain.InboundModeTCP, TCP: true}},
+		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, TCP: true}},
 		Outbounds:     []domain.Outbound{{ID: "outA", Name: "A", Address: backendAddr.IP.String(), Port: uint16(backendAddr.Port), Enabled: true}},
 		Bindings: []domain.Binding{
-			{ID: "b1", Enabled: true, InboundID: "in1", SelectionStrategy: domain.SelectionLeast, Targets: []domain.BindingTarget{{OutboundID: "outA", WeightPercent: 100}}},
+			{ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast, Targets: []domain.BindingTarget{{OutboundID: "outA", WeightPercent: 100}}},
 		},
 	}
 	if err := manager.Apply(cfg); err != nil {
@@ -224,6 +224,109 @@ func TestManagerStatsTracksLiveConnectionsAndIPs(t *testing.T) {
 	}
 }
 
+// A binding with action=drop must reset the connection outright — no
+// backend dial, no data relayed — rather than the ordinary "no matching
+// binding" outcome (also a close, but for a different reason: nothing at
+// all matched, versus something matched and explicitly said "refuse this").
+func TestManagerDropActionResetsConnectionWithoutDialingAnyBackend(t *testing.T) {
+	hello := captureClientHello(t, "blocked.example")
+	listenHost, listenPort := freeAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := NewManager(ctx, nil)
+
+	cfg := domain.ProfileConfig{
+		SchemaVersion: domain.SchemaVersion,
+		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, TCP: true}},
+		Bindings: []domain.Binding{
+			{ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, Action: domain.BindingActionDrop,
+				Groups: []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "blocked.example"}}}}},
+		},
+	}
+	if err := manager.Apply(cfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(listenHost, strconv.Itoa(int(listenPort))), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(hello); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 16)
+	n, readErr := conn.Read(buf)
+	if readErr == nil {
+		t.Fatalf("expected the connection to be dropped (EOF/reset), got %d bytes: %q", n, buf[:n])
+	}
+}
+
+// domain.ProfileConfig.Validate allows at most one empty-groups (default)
+// binding per inbound, but doesn't require it to be saved last in the
+// list — the Manager must still evaluate it last, or a specific rule saved
+// after it in raw list order would be silently unreachable.
+func TestManagerEvaluatesDefaultBindingLastRegardlessOfListOrder(t *testing.T) {
+	helloSpecific := captureClientHello(t, "specific.example")
+
+	defaultAddr, defaultPort, defaultReceived := echoBackend(t, len(helloSpecific))
+	specificAddr, specificPort, specificReceived := echoBackend(t, len(helloSpecific))
+
+	listenHost, listenPort := freeAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := NewManager(ctx, nil)
+
+	cfg := domain.ProfileConfig{
+		SchemaVersion: domain.SchemaVersion,
+		Inbounds:      []domain.Inbound{{ID: "in1", Name: "TLS", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, TCP: true}},
+		Outbounds: []domain.Outbound{
+			{ID: "outDefault", Name: "Default", Address: defaultAddr, Port: defaultPort, Enabled: true},
+			{ID: "outSpecific", Name: "Specific", Address: specificAddr, Port: specificPort, Enabled: true},
+		},
+		Bindings: []domain.Binding{
+			// The default is listed FIRST here on purpose — the Manager
+			// must still evaluate it last.
+			{ID: "bDefault", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast,
+				Targets: []domain.BindingTarget{{OutboundID: "outDefault", WeightPercent: 100}}},
+			{ID: "bSpecific", Enabled: true, InboundID: "in1", Mode: domain.BindingModeTCP, SelectionStrategy: domain.SelectionLeast,
+				Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldSNI, Operator: domain.MatchOpEquals, Value: "specific.example"}}}},
+				Targets: []domain.BindingTarget{{OutboundID: "outSpecific", WeightPercent: 100}}},
+		},
+	}
+	if err := manager.Apply(cfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(listenHost, strconv.Itoa(int(listenPort))), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(helloSpecific); err != nil {
+		t.Fatal(err)
+	}
+	ack := make([]byte, 3)
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(conn, ack); err != nil {
+		t.Fatalf("no ack (not routed at all): %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(specificReceived()) < len(helloSpecific) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := specificReceived(); !bytes.Equal(got, helloSpecific) {
+		t.Fatalf("the SPECIFIC backend received %d bytes matching helloSpecific, want %d — traffic was routed to the default instead of the specific rule", len(got), len(helloSpecific))
+	}
+	if got := defaultReceived(); len(got) != 0 {
+		t.Fatalf("the DEFAULT backend received %d bytes, want 0 — the specific rule should have shadowed it", len(got))
+	}
+}
+
 func TestManagerRoutesHTTPByHostAndPath(t *testing.T) {
 	usersBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "users:%s", r.URL.Path)
@@ -244,16 +347,16 @@ func TestManagerRoutesHTTPByHostAndPath(t *testing.T) {
 
 	cfg := domain.ProfileConfig{
 		SchemaVersion: domain.SchemaVersion,
-		Inbounds:      []domain.Inbound{{ID: "in1", Name: "HTTP", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, Mode: domain.InboundModeHTTP, TCP: true}},
+		Inbounds:      []domain.Inbound{{ID: "in1", Name: "HTTP", Enabled: true, ListenAddress: listenHost, ListenPort: listenPort, TCP: true}},
 		Outbounds: []domain.Outbound{
 			{ID: "outUsers", Name: "Users", Address: usersAddr, Port: usersPort, Enabled: true},
 			{ID: "outOrders", Name: "Orders", Address: ordersAddr, Port: ordersPort, Enabled: true},
 		},
 		Bindings: []domain.Binding{
-			{ID: "b1", Enabled: true, InboundID: "in1", SelectionStrategy: domain.SelectionLeast,
+			{ID: "b1", Enabled: true, InboundID: "in1", Mode: domain.BindingModeHTTP, SelectionStrategy: domain.SelectionLeast,
 				Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldPath, Operator: domain.MatchOpStartsWith, Value: "/users"}}}},
 				Targets: []domain.BindingTarget{{OutboundID: "outUsers", WeightPercent: 100}}},
-			{ID: "b2", Enabled: true, InboundID: "in1", SelectionStrategy: domain.SelectionLeast,
+			{ID: "b2", Enabled: true, InboundID: "in1", Mode: domain.BindingModeHTTP, SelectionStrategy: domain.SelectionLeast,
 				Groups:  []domain.MatchGroup{{Conditions: []domain.MatchCondition{{Field: domain.MatchFieldPath, Operator: domain.MatchOpStartsWith, Value: "/orders"}}}},
 				Targets: []domain.BindingTarget{{OutboundID: "outOrders", WeightPercent: 100}}},
 		},

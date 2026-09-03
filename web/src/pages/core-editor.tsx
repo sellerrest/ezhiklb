@@ -1,4 +1,4 @@
-import { ArrowLeft, MoreVertical, Pencil, Plus, Save, Search, Trash2 } from "lucide-react"
+import { AlertTriangle, ArrowLeft, Ban, ChevronDown, ChevronUp, MoreVertical, Pencil, Plus, Save, Search, Trash2 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useNavigate, useParams } from "react-router"
 import { toast } from "sonner"
@@ -30,7 +30,7 @@ const makeID = (prefix: string) => {
   return `${prefix}_${Array.from(bytes, (v) => v.toString(16).padStart(2, "0")).join("")}`
 }
 
-const newInbound = (): Inbound => ({ id: makeID("in"), name: "Новое входящее", enabled: true, listen_address: "0.0.0.0", listen_port: 8000, mode: "tcp", tcp: true, udp: false })
+const newInbound = (): Inbound => ({ id: makeID("in"), name: "Новое входящее", enabled: true, listen_address: "0.0.0.0", listen_port: 8000, tcp: true, udp: false })
 const newOutbound = (): Outbound => ({
   id: makeID("out"),
   name: "Новое исходящее",
@@ -39,7 +39,12 @@ const newOutbound = (): Outbound => ({
   enabled: true,
   health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 },
 })
-const newBinding = (): Binding => ({ id: makeID("bnd"), name: "", enabled: true, inbound_id: "", affinity_seconds: 0, selection_strategy: "least", groups: [], targets: [] })
+const newBinding = (): Binding => ({ id: makeID("bnd"), name: "", enabled: true, inbound_id: "", mode: "tcp", action: "forward", affinity_seconds: 0, selection_strategy: "least", groups: [], targets: [] })
+
+// UDP carries no SNI/URI-path — a binding with real match rules (not just
+// an empty-groups default) on an inbound with udp enabled means UDP stops
+// being forwarded there at all (see node-agent's compileServices).
+const udpDisabledByRules = (inboundId: string, bindings: Binding[]) => bindings.some((b) => b.inbound_id === inboundId && b.groups.some((g) => g.conditions.length > 0))
 
 type Tab = "inbounds" | "bindings" | "outbounds"
 const TABS: Tab[] = ["inbounds", "bindings", "outbounds"]
@@ -143,6 +148,24 @@ export default function CoreEditorPage({ cores, nodes, onChanged }: { cores: Cor
     setConfig({ ...config, bindings: config.bindings.filter((_, i) => i !== index) })
     setRemovingBindingIndex(null)
   }
+  // Priority is array order: the node evaluates one inbound's bindings
+  // top-to-bottom, first match wins (the default, empty-groups binding is
+  // always evaluated last regardless of position — see node-agent). Moving
+  // a rule only ever swaps it with its neighbor *within the same inbound*,
+  // leaving every other inbound's bindings and the default untouched.
+  const moveBinding = (bindingId: string, direction: -1 | 1) => {
+    const binding = config.bindings.find((b) => b.id === bindingId)
+    if (!binding) return
+    const groupIndices = config.bindings.map((b, i) => ({ b, i })).filter(({ b }) => b.inbound_id === binding.inbound_id && b.groups.length > 0).map(({ i }) => i)
+    const pos = groupIndices.findIndex((i) => config.bindings[i].id === bindingId)
+    const swapWith = pos + direction
+    if (pos < 0 || swapWith < 0 || swapWith >= groupIndices.length) return
+    const bindings = [...config.bindings]
+    const a = groupIndices[pos]
+    const b = groupIndices[swapWith]
+    ;[bindings[a], bindings[b]] = [bindings[b], bindings[a]]
+    setConfig({ ...config, bindings })
+  }
 
   const addForCurrentTab = () => {
     if (tab === "inbounds") setEditingInbound({ inbound: newInbound(), index: null })
@@ -216,7 +239,6 @@ export default function CoreEditorPage({ cores, nodes, onChanged }: { cores: Cor
                   <TableRow>
                     <TableHead>Название</TableHead>
                     <TableHead>Хост:порт</TableHead>
-                    <TableHead>Режим</TableHead>
                     <TableHead>Протокол</TableHead>
                     <TableHead className="w-10" />
                     <TableHead className="w-10" />
@@ -225,6 +247,7 @@ export default function CoreEditorPage({ cores, nodes, onChanged }: { cores: Cor
                 <TableBody>
                   {filteredInbounds.map((inbound) => {
                     const index = config.inbounds.indexOf(inbound)
+                    const udpDisabled = inbound.udp && udpDisabledByRules(inbound.id, config.bindings)
                     return (
                       <TableRow key={inbound.id} className={cn("cursor-pointer", !inbound.enabled && "opacity-50")} onClick={() => setEditingInbound({ inbound: structuredClone(inbound), index })}>
                         <TableCell className="font-medium">{inbound.name}</TableCell>
@@ -232,12 +255,14 @@ export default function CoreEditorPage({ cores, nodes, onChanged }: { cores: Cor
                           {inbound.listen_address}:{inbound.listen_port}
                         </TableCell>
                         <TableCell>
-                          <Badge variant="secondary">{inbound.mode.toUpperCase()}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
                             {inbound.tcp && <Badge variant="secondary">TCP</Badge>}
-                            {inbound.udp && <Badge variant="secondary">UDP</Badge>}
+                            {inbound.udp && <Badge variant={udpDisabled ? "red" : "secondary"}>UDP</Badge>}
+                            {udpDisabled && (
+                              <span className="text-destructive flex items-center gap-1 text-xs">
+                                <AlertTriangle className="h-3.5 w-3.5" /> отключён правилами
+                              </span>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}>
@@ -258,26 +283,88 @@ export default function CoreEditorPage({ cores, nodes, onChanged }: { cores: Cor
           (filteredBindings.length === 0 ? (
             <div className="text-muted-foreground rounded-lg border border-dashed p-6 text-center text-sm">{query ? "Ничего не найдено" : "Свяжите входящий с исходящим, чтобы начать пересылку трафика."}</div>
           ) : (
-            <div className="flex flex-col gap-2">
-              {filteredBindings.map((binding) => {
-                const index = config.bindings.indexOf(binding)
-                return (
-                  <Card
-                    key={binding.id}
-                    className={cn("flex cursor-pointer items-center gap-3 p-3 transition-colors hover:bg-accent/40", !binding.enabled && "opacity-50")}
-                    onClick={() => setEditingBinding({ binding: structuredClone(binding), index })}
-                  >
-                    <span className={cn("h-2 w-2 shrink-0 rounded-full", binding.enabled ? "bg-success" : "bg-muted-foreground")} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{binding.name || bindingStrip(binding, config.inbounds, config.outbounds)}</div>
-                      {binding.name && <div className="text-muted-foreground truncate font-mono text-xs">{bindingStrip(binding, config.inbounds, config.outbounds)}</div>}
+            <div className="flex flex-col gap-4">
+              {config.inbounds
+                .filter((inbound) => filteredBindings.some((b) => b.inbound_id === inbound.id))
+                .map((inbound) => {
+                  const groupBindings = filteredBindings.filter((b) => b.inbound_id === inbound.id)
+                  const ordinary = groupBindings.filter((b) => b.groups.length > 0)
+                  const defaultBinding = groupBindings.find((b) => b.groups.length === 0)
+                  const udpDisabled = inbound.udp && udpDisabledByRules(inbound.id, config.bindings)
+                  return (
+                    <div key={inbound.id}>
+                      <div className="mb-1.5 flex items-center gap-2 text-xs">
+                        <span className="font-semibold">{inbound.name}</span>
+                        <span className="text-muted-foreground font-mono">
+                          {inbound.listen_address}:{inbound.listen_port}
+                        </span>
+                        {udpDisabled && (
+                          <span className="text-destructive flex items-center gap-1">
+                            <AlertTriangle className="h-3.5 w-3.5" /> UDP отключён правилами
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-2">
+                        {ordinary.map((binding, i) => {
+                          const index = config.bindings.indexOf(binding)
+                          return (
+                            <Card
+                              key={binding.id}
+                              className={cn("flex cursor-pointer items-center gap-2 p-3 transition-colors hover:bg-accent/40", !binding.enabled && "opacity-50")}
+                              onClick={() => setEditingBinding({ binding: structuredClone(binding), index })}
+                            >
+                              <div className="flex flex-col" onClick={(e) => e.stopPropagation()}>
+                                <button type="button" disabled={i === 0} className="text-muted-foreground hover:text-foreground disabled:opacity-30" onClick={() => moveBinding(binding.id, -1)} aria-label="Поднять правило выше">
+                                  <ChevronUp className="h-4 w-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={i === ordinary.length - 1}
+                                  className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+                                  onClick={() => moveBinding(binding.id, 1)}
+                                  aria-label="Опустить правило ниже"
+                                >
+                                  <ChevronDown className="h-4 w-4" />
+                                </button>
+                              </div>
+                              <span className={cn("h-2 w-2 shrink-0 rounded-full", binding.enabled ? "bg-success" : "bg-muted-foreground")} />
+                              {binding.action === "drop" && <Ban className="text-destructive h-4 w-4 shrink-0" />}
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm font-medium">{binding.name || bindingStrip(binding, config.inbounds, config.outbounds)}</div>
+                                {binding.name && <div className="text-muted-foreground truncate font-mono text-xs">{bindingStrip(binding, config.inbounds, config.outbounds)}</div>}
+                              </div>
+                              <div onClick={(e) => e.stopPropagation()}>
+                                <RowMenu onEdit={() => setEditingBinding({ binding: structuredClone(binding), index })} onDelete={() => setRemovingBindingIndex(index)} />
+                              </div>
+                            </Card>
+                          )
+                        })}
+                        {defaultBinding &&
+                          (() => {
+                            const binding = defaultBinding
+                            const index = config.bindings.indexOf(binding)
+                            return (
+                              <Card
+                                className={cn("bg-accent/30 flex cursor-pointer items-center gap-2 border-dashed p-3 transition-colors hover:bg-accent/50", !binding.enabled && "opacity-50")}
+                                onClick={() => setEditingBinding({ binding: structuredClone(binding), index })}
+                              >
+                                <span className="text-muted-foreground w-14 shrink-0 text-center text-[10px] font-semibold uppercase">По умолч.</span>
+                                <span className={cn("h-2 w-2 shrink-0 rounded-full", binding.enabled ? "bg-success" : "bg-muted-foreground")} />
+                                {binding.action === "drop" && <Ban className="text-destructive h-4 w-4 shrink-0" />}
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-sm font-medium">{binding.name || bindingStrip(binding, config.inbounds, config.outbounds)}</div>
+                                  {binding.name && <div className="text-muted-foreground truncate font-mono text-xs">{bindingStrip(binding, config.inbounds, config.outbounds)}</div>}
+                                </div>
+                                <div onClick={(e) => e.stopPropagation()}>
+                                  <RowMenu onEdit={() => setEditingBinding({ binding: structuredClone(binding), index })} onDelete={() => setRemovingBindingIndex(index)} />
+                                </div>
+                              </Card>
+                            )
+                          })()}
+                      </div>
                     </div>
-                    <div onClick={(e) => e.stopPropagation()}>
-                      <RowMenu onEdit={() => setEditingBinding({ binding: structuredClone(binding), index })} onDelete={() => setRemovingBindingIndex(index)} />
-                    </div>
-                  </Card>
-                )
-              })}
+                  )
+                })}
             </div>
           ))}
 
@@ -369,7 +456,7 @@ export default function CoreEditorPage({ cores, nodes, onChanged }: { cores: Cor
         />
       )}
 
-      {editingBinding && <BindingDialog initial={editingBinding.binding} inbounds={config.inbounds} outbounds={config.outbounds} onSave={saveBinding} onClose={() => setEditingBinding(null)} />}
+      {editingBinding && <BindingDialog initial={editingBinding.binding} inbounds={config.inbounds} outbounds={config.outbounds} allBindings={config.bindings} onSave={saveBinding} onClose={() => setEditingBinding(null)} />}
       {removingBindingIndex != null && (
         <ConfirmDialog title="Удалить связующее?" description="Это связующее будет удалено из ядра." confirmLabel="Удалить связующее" danger onCancel={() => setRemovingBindingIndex(null)} onConfirm={() => removeBindingAt(removingBindingIndex)} />
       )}

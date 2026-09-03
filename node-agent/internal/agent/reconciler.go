@@ -453,13 +453,33 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 		if !inbound.Enabled || !inbound.UDP {
 			continue
 		}
+		bindings := bindingsByInbound[inbound.ID]
+
+		// A binding with real match rules (non-empty Groups) can never
+		// actually apply to UDP — it carries no SNI/Host to test those
+		// rules against. Rather than silently ignoring the rules and
+		// forwarding everything anyway (surprising: traffic the operator
+		// meant to filter would sail right through), UDP is not forwarded
+		// for this inbound at all once such a rule exists. A binding with
+		// an empty Groups list (an inbound's default/catch-all) is fine —
+		// it was already going to match everything.
+		hasRealRules := false
+		for _, binding := range bindings {
+			if len(binding.Groups) > 0 {
+				hasRealRules = true
+				break
+			}
+		}
+		if hasRealRules {
+			continue
+		}
+
 		address := vip
 		if inbound.ListenAddress != "" && inbound.ListenAddress != "0.0.0.0" {
 			address = inbound.ListenAddress
 		}
 		service := Service{Protocol: domain.ProtocolUDP, Address: address, Port: inbound.ListenPort, Scheduler: "wrr"}
 
-		bindings := bindingsByInbound[inbound.ID]
 		if len(bindings) > 0 {
 			// UDP can't carry SNI/Host, so every binding on this inbound
 			// feeds the same flat pool; only the first governs scheduler and
