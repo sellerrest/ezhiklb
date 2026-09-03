@@ -95,7 +95,12 @@ export function BindingDialog({
   const setTargetWeight = (outboundId: string, weight: number) => patch({ targets: binding.targets.map((t) => (t.outbound_id === outboundId ? { ...t, weight_percent: weight } : t)) })
   const weightSum = binding.targets.reduce((sum, t) => sum + t.weight_percent, 0)
 
-  const setAction = (action: BindingAction) => patch({ action, targets: action === "drop" ? [] : binding.targets })
+  // Switching to drop doesn't clear the picked outbounds — you can toggle
+  // Дефолтное правило back and forth without losing what you'd set up for
+  // "Пересылать". The backend only ever sees targets when action is
+  // actually forward (submit strips them for drop), so this is purely a
+  // UI convenience, not a stored/effective config.
+  const setAction = (action: BindingAction) => patch({ action })
 
   const submit = () => {
     const nextErrors: Record<string, string> = {}
@@ -106,7 +111,10 @@ export function BindingDialog({
     if (binding.action === "forward" && binding.targets.length === 0) nextErrors.targets = "Выберите хотя бы один исходящий"
     if (binding.action === "forward" && binding.selection_strategy === "manual" && binding.targets.length > 0 && weightSum !== 100) nextErrors.weights = "Сумма процентов должна быть равна 100"
     setErrors(nextErrors)
-    if (Object.keys(nextErrors).length === 0) onSave({ ...binding, name: binding.name.trim() || bindingDefaultName(binding, inbounds, outbounds) })
+    if (Object.keys(nextErrors).length === 0) {
+      const toSave = binding.action === "drop" ? { ...binding, targets: [] } : binding
+      onSave({ ...toSave, name: toSave.name.trim() || bindingDefaultName(toSave, inbounds, outbounds) })
+    }
   }
 
   return (
@@ -251,77 +259,78 @@ export function BindingDialog({
           </div>
         )}
 
-        {binding.action === "forward" && (
-          <>
-            <div>
-              <p className="text-muted-foreground mb-2 text-xs font-semibold uppercase">Исходящие</p>
-              <div className="flex flex-col gap-2">
-                {outbounds.map((outbound) => {
-                  const target = binding.targets.find((t) => t.outbound_id === outbound.id)
-                  const checked = Boolean(target)
-                  return (
-                    <div key={outbound.id} className="flex items-center gap-3 rounded-lg border p-2">
-                      <Checkbox checked={checked} onCheckedChange={(c) => toggleTarget(outbound.id, Boolean(c))} aria-label={`Выбрать ${outbound.name}`} />
-                      <span className="flex-1 truncate text-sm">{outbound.name}</span>
-                      <span className="text-muted-foreground font-mono text-xs">
-                        {outbound.address}:{outbound.port}
-                      </span>
-                      {checked && binding.selection_strategy === "manual" && (
-                        <div className="flex items-center gap-1">
-                          <Input className="h-8 w-16" type="number" min={1} max={100} value={target!.weight_percent} onChange={(e) => setTargetWeight(outbound.id, Number(e.target.value))} />
-                          <span className="text-muted-foreground text-xs">%</span>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-                {outbounds.length === 0 && <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-sm">Сначала добавьте исходящие</div>}
-              </div>
-              {errors.targets && <span className="text-destructive text-xs">{errors.targets}</span>}
-              {binding.selection_strategy === "manual" && binding.targets.length > 0 && (
-                <div className="mt-1 text-xs">
-                  Сумма: <Badge variant={weightSum === 100 ? "green" : "red"}>{weightSum}%</Badge>
-                </div>
-              )}
-              {errors.weights && <span className="text-destructive text-xs">{errors.weights}</span>}
-            </div>
-
-            {binding.targets.length > 1 && (
-              <div className="flex flex-col gap-1.5">
-                <Label>Критерий выбора исходящего</Label>
-                <Select value={binding.selection_strategy} onValueChange={(v) => patch({ selection_strategy: v as SelectionStrategy })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(strategyLabels) as SelectionStrategy[]).map((strategy) => (
-                      <SelectItem key={strategy} value={strategy}>
-                        {strategyLabels[strategy]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
-            <div className="flex flex-col gap-1.5">
-              <Label>Affinity</Label>
-              <Select value={String(binding.affinity_seconds)} onValueChange={(v) => patch({ affinity_seconds: Number(v) })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {affinityPresets.map((preset) => (
-                    <SelectItem key={preset.value} value={String(preset.value)}>
-                      {preset.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <span className="text-muted-foreground text-xs">Закрепляет IP клиента за одним исходящим на указанное время</span>
-            </div>
-          </>
+        {isDefault && binding.action === "drop" && (
+          <p className="text-muted-foreground text-xs">
+            Сейчас несовпавший трафик разрывается — выбор исходящих ниже применится, только если переключить «Дефолтное правило» на «Пересылать».
+          </p>
         )}
+        <div>
+          <p className="text-muted-foreground mb-2 text-xs font-semibold uppercase">Исходящие</p>
+          <div className="flex flex-col gap-2">
+            {outbounds.map((outbound) => {
+              const target = binding.targets.find((t) => t.outbound_id === outbound.id)
+              const checked = Boolean(target)
+              return (
+                <div key={outbound.id} className="flex items-center gap-3 rounded-lg border p-2">
+                  <Checkbox checked={checked} onCheckedChange={(c) => toggleTarget(outbound.id, Boolean(c))} aria-label={`Выбрать ${outbound.name}`} />
+                  <span className="flex-1 truncate text-sm">{outbound.name}</span>
+                  <span className="text-muted-foreground font-mono text-xs">
+                    {outbound.address}:{outbound.port}
+                  </span>
+                  {checked && binding.selection_strategy === "manual" && (
+                    <div className="flex items-center gap-1">
+                      <Input className="h-8 w-16" type="number" min={1} max={100} value={target!.weight_percent} onChange={(e) => setTargetWeight(outbound.id, Number(e.target.value))} />
+                      <span className="text-muted-foreground text-xs">%</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            {outbounds.length === 0 && <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-sm">Сначала добавьте исходящие</div>}
+          </div>
+          {errors.targets && <span className="text-destructive text-xs">{errors.targets}</span>}
+          {binding.selection_strategy === "manual" && binding.targets.length > 0 && (
+            <div className="mt-1 text-xs">
+              Сумма: <Badge variant={weightSum === 100 ? "green" : "red"}>{weightSum}%</Badge>
+            </div>
+          )}
+          {errors.weights && <span className="text-destructive text-xs">{errors.weights}</span>}
+        </div>
+
+        {binding.targets.length > 1 && (
+          <div className="flex flex-col gap-1.5">
+            <Label>Критерий выбора исходящего</Label>
+            <Select value={binding.selection_strategy} onValueChange={(v) => patch({ selection_strategy: v as SelectionStrategy })}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(strategyLabels) as SelectionStrategy[]).map((strategy) => (
+                  <SelectItem key={strategy} value={strategy}>
+                    {strategyLabels[strategy]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+
+        <div className="flex flex-col gap-1.5">
+          <Label>Affinity</Label>
+          <Select value={String(binding.affinity_seconds)} onValueChange={(v) => patch({ affinity_seconds: Number(v) })}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {affinityPresets.map((preset) => (
+                <SelectItem key={preset.value} value={String(preset.value)}>
+                  {preset.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="text-muted-foreground text-xs">Закрепляет IP клиента за одним исходящим на указанное время</span>
+        </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
